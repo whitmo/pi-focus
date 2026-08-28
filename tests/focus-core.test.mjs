@@ -68,6 +68,49 @@ test("preserves intentional empty activation tools but strips executable fields"
   assert.equal("agent" in state.foci[1], false);
 });
 
+test("normalizes bounded inert runbooks, preserves them across mutations, and retires IDs", () => {
+  const monitors = Array.from({ length: 10 }, (_, index) => `monitor-${index}`);
+  const scripts = Array.from({ length: 10 }, (_, index) => `script-${index}`);
+  const agents = Array.from({ length: 10 }, (_, index) => `agent-${index}`);
+  let state = createFocus(createEmptyState(), {
+    name: "Foo",
+    activation: {
+      loadoutPreset: "team-default",
+      monitors,
+      scripts,
+      agents,
+      command: "must be stripped",
+    },
+  }, "2026-08-28T00:00:00.000Z");
+
+  const declarations = {
+    loadoutPreset: "team-default",
+    monitors: monitors.slice(0, 8),
+    scripts: scripts.slice(0, 8),
+    agents: agents.slice(0, 8),
+  };
+  assert.deepEqual(state.foci[0].activation, declarations);
+
+  state = normalizeFocusState(JSON.parse(JSON.stringify(state)));
+  state = addFocusNote(state, "Keep this context", "2026-08-28T00:00:01.000Z");
+  state = updateFocus(state, "foo", {
+    activation: { tools: ["bash"] },
+  }, "2026-08-28T00:00:02.000Z");
+  assert.deepEqual(state.foci[0].activation, { tools: ["bash"], ...declarations });
+
+  state = deleteFocus(state, "foo", "2026-08-28T00:00:03.000Z");
+  assert.deepEqual(state.retiredFocusIds, ["foo"]);
+  state = createFocus(state, { name: "Foo" }, "2026-08-28T00:00:04.000Z");
+  assert.equal(state.foci[0].id, "foo-2");
+});
+
+test("rejects invalid activation updates before preserving existing declarations", () => {
+  const state = createFocus(createEmptyState(), { name: "Safe", activation: { monitors: ["watch CI"] } });
+
+  assert.throws(() => updateFocus(state, "safe", { activation: null }), /invalid activation metadata/i);
+  assert.throws(() => updateFocus(state, "safe", { activation: "not declarations" }), /invalid activation metadata/i);
+});
+
 test("updates and deletes focus records without clearing unrelated IDs", () => {
   let state = createEmptyState();
   state = createFocus(state, { name: "First" }, "2026-08-28T00:00:00.000Z");

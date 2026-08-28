@@ -29,7 +29,8 @@ export function resolveToolPolicy(requested, registered, active) {
 }
 
 export function buildFocusContext(focus, paths, capabilities) {
-  const declared = focus.activation?.tools;
+  const activation = focus.activation ?? {};
+  const declared = activation.tools;
   const registered = capabilities?.registeredTools ?? [];
   const active = capabilities?.activeTools ?? [];
   const activeRegistered = declared?.filter((name) => registered.includes(name) && active.includes(name)) ?? [];
@@ -56,7 +57,11 @@ export function buildFocusContext(focus, paths, capabilities) {
     `- Active + registered: ${declared === undefined ? "no focus policy" : list(activeRegistered)}`,
     `- Registered but inactive (available for explicit activation): ${declared === undefined ? "none" : list(inactiveRegistered)}`,
     `- Unregistered/unavailable: ${declared === undefined ? "none" : list(unavailable)}`,
-    "- Requires explicit invocation: declarations only guard currently active tools; they do not run loadouts, processes, subagents, reloads, discovery, or registration.",
+    `- Loadout preset intent: ${field(activation.loadoutPreset) || "none"}`,
+    `- Monitor runbooks: ${list(activation.monitors)}`,
+    `- Script runbooks: ${list(activation.scripts)}`,
+    `- Agent runbooks: ${list(activation.agents)}`,
+    "- Requires explicit invocation: declarations only guard currently active tools; they do not run loadouts, processes, scripts, or subagents.",
     `- Optional capability status: loadout_profile ${capabilityText(capabilities?.loadoutProfile)}, process ${capabilityText(capabilities?.process)}, subagent ${capabilityText(capabilities?.subagent)}.`,
   ].filter(Boolean);
   const context = lines.join("\n");

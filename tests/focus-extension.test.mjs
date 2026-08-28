@@ -9,6 +9,9 @@ const require = createRequire(import.meta.url);
 const { createJiti } = require("jiti");
 const jiti = createJiti(import.meta.url, { moduleCache: false });
 
+const core = await import("../extensions/focus-core.mjs");
+const store = await import("../extensions/focus-store.mjs");
+
 test("registers focus command, skill resources, status, and context injection", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "focus-extension-"));
   mkdirSync(join(cwd, ".agents", "focus"), { recursive: true });
@@ -389,8 +392,8 @@ test("switch directory failure preserves focus A and its runtime policy", async 
   assert.equal(events.get("tool_call")({ toolName: "read" }, ctx), undefined);
 });
 
-test("switch status failure preserves focus A and guard policy", async () => {
-  const cwd = mkdtempSync(join(tmpdir(), "focus-extension-status-rollback-"));
+test("post-commit status failure preserves the committed focus and interleaved update", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "focus-extension-status-commit-"));
   mkdirSync(join(cwd, ".agents", "focus"), { recursive: true });
   const statePath = join(cwd, ".agents", "focus", "state.json");
   writeFileSync(statePath, JSON.stringify({
@@ -415,19 +418,27 @@ test("switch status failure preserves focus A and guard policy", async () => {
   const ctx = {
     cwd,
     ui: {
-      notify() {}, setStatus() { if (failStatus) throw new Error("setStatus failed"); }, setTitle() {},
+      notify() {},
+      setStatus() {
+        if (!failStatus) return;
+        store.updateFocusState(cwd, (state) => core.updateFocus(state, "one", { goals: "Interleaved update" }));
+        throw new Error("setStatus failed");
+      },
+      setTitle() {},
       theme: { fg(_color, text) { return text; } },
     },
   };
 
   events.get("session_start")({}, ctx);
   failStatus = true;
-  await assert.rejects(commands.get("focus").handler("use two", ctx), /setStatus failed/);
+  await commands.get("focus").handler("use two", ctx);
 
-  assert.equal(JSON.parse(readFileSync(statePath, "utf8")).activeFocusId, "one");
+  const state = JSON.parse(readFileSync(statePath, "utf8"));
+  assert.equal(state.activeFocusId, "two");
+  assert.equal(state.foci.find((focus) => focus.id === "one").goals, "Interleaved update");
   assert.deepEqual(tools, ["read", "bash"]);
-  assert.equal(events.get("tool_call")({ toolName: "read" }, ctx), undefined);
-  assert.equal(events.get("tool_call")({ toolName: "bash" }, ctx).block, true);
+  assert.equal(events.get("tool_call")({ toolName: "read" }, ctx).block, true);
+  assert.equal(events.get("tool_call")({ toolName: "bash" }, ctx), undefined);
 });
 
 test("guard permits only declared active registered tools", async () => {
@@ -454,17 +465,25 @@ test("guard permits only declared active registered tools", async () => {
   assert.match(events.get("tool_call")({ toolName: "missing" }, ctx).reason, /not registered/);
 });
 
-test("focus management UI edits fields and activation declarations through the state transaction", async () => {
+test("focus management UI edits and preserves inert activation declarations through the state transaction", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "focus-extension-edit-"));
   mkdirSync(join(cwd, ".agents", "focus"), { recursive: true });
   const statePath = join(cwd, ".agents", "focus", "state.json");
   writeFileSync(statePath, JSON.stringify({
     activeFocusId: "main", lastFocusId: "main", updatedAt: null,
-    foci: [{ id: "main", name: "Main", goals: "Old goals", activation: { tools: ["read"] } }],
+    foci: [{
+      id: "main", name: "Main", goals: "Old goals", activation: {
+        tools: ["read"],
+        loadoutPreset: "existing-preset",
+        monitors: ["existing monitor"],
+        scripts: ["existing script"],
+        agents: ["existing agent"],
+      },
+    }],
   }));
   const commands = new Map();
-  const selections = ["Goals", "Tool declarations", "Tool declarations"];
-  const editors = ["New goals", "read\nbash", ""];
+  const selections = ["Goals", "Tool declarations", "Loadout preset", "Monitor declarations", "Script declarations", "Agent declarations"];
+  const editors = ["New goals", "read\nbash", "team-default", "watch CI", "refresh fixtures", "reviewer"];
   const pi = { on() {}, registerCommand(name, command) { commands.set(name, command); } };
   const mod = await jiti.import("../extensions/index.ts");
   mod.default(pi);
@@ -472,21 +491,22 @@ test("focus management UI edits fields and activation declarations through the s
     cwd, hasUI: true,
     ui: {
       async select(_title, options) { const choice = selections.shift(); assert.ok(options.includes(choice)); return choice; },
-      async input() { return inputs.shift(); },
-      async editor() { return editors.shift(); },
+      async input() { return undefined; }, async editor() { return editors.shift(); },
       notify() {}, setStatus() {}, setTitle() {}, theme: { fg(_color, text) { return text; } },
     },
   };
 
-  await commands.get("focus").handler("edit", ctx);
-  await commands.get("focus").handler("edit", ctx);
+  for (let index = 0; index < 6; index += 1) await commands.get("focus").handler("edit", ctx);
 
-  let focus = JSON.parse(readFileSync(statePath, "utf8")).foci[0];
+  const focus = JSON.parse(readFileSync(statePath, "utf8")).foci[0];
   assert.equal(focus.goals, "New goals");
-  assert.deepEqual(focus.activation.tools, ["read", "bash"]);
-  await commands.get("focus").handler("edit", ctx);
-  focus = JSON.parse(readFileSync(statePath, "utf8")).foci[0];
-  assert.deepEqual(focus.activation.tools, []);
+  assert.deepEqual(focus.activation, {
+    tools: ["read", "bash"],
+    loadoutPreset: "team-default",
+    monitors: ["watch CI"],
+    scripts: ["refresh fixtures"],
+    agents: ["reviewer"],
+  });
   const source = readFileSync(new URL("../extensions/index.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /saveFocusState|setActiveTools|ask-user/);
   assert.doesNotMatch(source, /writeFileSync\([^\n]*state\.json/);
@@ -531,6 +551,48 @@ test("focus management UI deletes confirmed focus metadata and directory without
   assert.deepEqual(state.foci, []);
   assert.equal(existsSync(join(cwd, ".agents", "focus", "foci", "main")), false);
   assert.equal(setActiveToolsCalls, 0);
+});
+
+test("stale delete confirmation cannot delete a replacement focus or its knowledge", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "focus-extension-stale-delete-"));
+  mkdirSync(join(cwd, ".agents", "focus"), { recursive: true });
+  const statePath = join(cwd, ".agents", "focus", "state.json");
+  writeFileSync(statePath, JSON.stringify({
+    activeFocusId: "foo", lastFocusId: "foo", updatedAt: null,
+    foci: [{ id: "foo", name: "Foo", createdAt: "2026-08-28T00:00:00.000Z" }],
+  }));
+  const commands = new Map();
+  const notices = [];
+  let replacementId;
+  const pi = { on() {}, registerCommand(name, command) { commands.set(name, command); } };
+  const mod = await jiti.import("../extensions/index.ts");
+  mod.default(pi);
+  const ctx = {
+    cwd, hasUI: true,
+    ui: {
+      async select(_title, options) {
+        if (options[0] === "Foo (foo)") return "Foo (foo)";
+        const replacement = store.updateFocusState(cwd, (state) => core.createFocus(
+          core.deleteFocus(state, "foo", "2026-08-28T00:00:01.000Z"),
+          { name: "Foo" },
+          "2026-08-28T00:00:02.000Z",
+        ));
+        replacementId = replacement.activeFocusId;
+        store.writeKnowledgeEntry(cwd, replacementId, "later", "replacement knowledge");
+        return options.find((option) => option.startsWith("Delete"));
+      },
+      input: async () => undefined, editor: async () => undefined,
+      notify(message) { notices.push(message); }, setStatus() {}, setTitle() {}, theme: { fg(_color, text) { return text; } },
+    },
+  };
+
+  await commands.get("focus").handler("delete", ctx);
+
+  const state = JSON.parse(readFileSync(statePath, "utf8"));
+  assert.equal(replacementId, "foo-2");
+  assert.deepEqual(state.foci.map((focus) => focus.id), ["foo-2"]);
+  assert.equal(readFileSync(join(cwd, ".agents", "focus", "foci", "foo-2", "kb", "later.md"), "utf8"), "replacement knowledge");
+  assert.match(notices.at(-1), /delete selection is stale/i);
 });
 
 test("focus KB UI creates, edits, and confirms deletion of project-local Markdown", async () => {
@@ -606,23 +668,54 @@ test("focus status is truthful and use/create share chooser activation", async (
   assert.equal(messages.filter((message) => /Return to this focus/.test(message)).length, 2);
 });
 
-test("focus command avoids dialogs when the host has no UI", async () => {
+test("non-UI deterministic commands work without dialogs and off clears the guard", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "focus-extension-no-ui-"));
+  mkdirSync(join(cwd, ".agents", "focus"), { recursive: true });
+  const statePath = join(cwd, ".agents", "focus", "state.json");
+  writeFileSync(statePath, JSON.stringify({
+    activeFocusId: "main", lastFocusId: "main", updatedAt: null,
+    foci: [{ id: "main", name: "Main", activation: { tools: [] } }],
+  }));
   const commands = new Map();
+  const events = new Map();
   const notices = [];
-  const pi = { on() {}, registerCommand(name, command) { commands.set(name, command); } };
+  let dialogs = 0;
+  const pi = {
+    on(name, handler) { events.set(name, handler); },
+    registerCommand(name, command) { commands.set(name, command); },
+    sendUserMessage() {},
+    getActiveTools() { return ["read"]; },
+    getAllTools() { return [{ name: "read" }]; },
+  };
   const mod = await jiti.import("../extensions/index.ts");
   mod.default(pi);
-  await commands.get("focus").handler("", {
-    cwd, hasUI: false,
+  const ctx = {
+    cwd, hasUI: false, isIdle() { return true; },
     ui: {
-      select: async () => { throw new Error("must not open a dialog"); },
-      input: async () => { throw new Error("must not open a dialog"); },
-      editor: async () => { throw new Error("must not open a dialog"); },
+      select: async () => { dialogs += 1; throw new Error("must not open a dialog"); },
+      input: async () => { dialogs += 1; throw new Error("must not open a dialog"); },
+      editor: async () => { dialogs += 1; throw new Error("must not open a dialog"); },
       notify(message) { notices.push(message); }, setStatus() {}, setTitle() {}, theme: { fg(_color, text) { return text; } },
     },
-  });
-  assert.match(notices[0], /interactive focus management is unavailable/i);
+  };
+
+  await commands.get("focus").handler("off", ctx);
+  assert.equal(JSON.parse(readFileSync(statePath, "utf8")).activeFocusId, null);
+  assert.equal(events.get("tool_call")({ toolName: "read" }, ctx), undefined);
+  await commands.get("focus").handler("status", ctx);
+  await commands.get("focus").handler("use main", ctx);
+  assert.equal(JSON.parse(readFileSync(statePath, "utf8")).activeFocusId, "main");
+  await commands.get("focus").handler("off", ctx);
+  await commands.get("focus").handler("on", ctx);
+  assert.equal(JSON.parse(readFileSync(statePath, "utf8")).activeFocusId, "main");
+  await commands.get("focus").handler("help", ctx);
+
+  for (const args of ["", "query", "new", "expand", "narrow", "edit", "delete", "kb"]) {
+    await commands.get("focus").handler(args, ctx);
+  }
+  assert.equal(dialogs, 0);
+  assert.match(notices[0], /focus: off/i);
+  assert.equal(notices.filter((message) => /interactive focus management is unavailable/i.test(message)).length, 8);
 });
 
 test("focus help and skill describe automatic context with explicit declarative intents", async () => {

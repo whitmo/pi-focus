@@ -10,10 +10,19 @@ type ExtensionAPI = {
   getAllTools?: () => ToolInfo[];
 };
 
+type FocusActivation = {
+  tools?: string[];
+  loadoutPreset?: string;
+  monitors?: string[];
+  scripts?: string[];
+  agents?: string[];
+};
+
 type FocusState = {
   activeFocusId: string | null;
   lastFocusId: string | null;
-  foci: Array<{ id: string; name: string; activation?: { tools: string[] }; [key: string]: unknown }>;
+  retiredFocusIds: string[];
+  foci: Array<{ id: string; name: string; activation?: FocusActivation; [key: string]: unknown }>;
   updatedAt: string | null;
 };
 
@@ -75,25 +84,20 @@ export default function focusExtension(pi: ExtensionAPI) {
 
   const activateFocus = async (ctx: CommandContext, transition: (state: FocusState) => FocusState, steer: boolean): Promise<void> => {
     await ctx.waitForIdle?.();
-    const priorState = loadFocusState(ctx.cwd) as FocusState;
-    let state: FocusState;
-    let stateChanged = false;
-    try {
-      state = updateFocusState(ctx.cwd, (current: FocusState) => {
-        const next = transition(current);
-        const nextFocus = getActiveFocus(next);
-        if (nextFocus) ensureFocusDirectories(ctx.cwd, nextFocus.id);
-        return next;
-      }) as FocusState;
-      stateChanged = true;
-      updateFocusStatus(ctx, state, capabilities());
-    } catch (error) {
-      if (stateChanged) updateFocusState(ctx.cwd, () => priorState);
-      throw error;
-    }
+    const state = updateFocusState(ctx.cwd, (current: FocusState) => {
+      const next = transition(current);
+      const nextFocus = getActiveFocus(next);
+      if (nextFocus) ensureFocusDirectories(ctx.cwd, nextFocus.id);
+      return next;
+    }) as FocusState;
     const focus = getActiveFocus(state);
-    if (!focus) return;
-    if (steer) sendFocusMessage(pi, ctx, `Return to this focus and keep the next answer centered on it:\n\n${summarizeFocus(focus)}`);
+    try {
+      updateFocusStatus(ctx, state, capabilities());
+    } catch {}
+    if (!focus || !steer) return;
+    try {
+      sendFocusMessage(pi, ctx, `Return to this focus and keep the next answer centered on it:\n\n${summarizeFocus(focus)}`);
+    } catch {}
   };
 
   pi.on("session_start", (_event, ctx) => {
@@ -141,11 +145,12 @@ export default function focusExtension(pi: ExtensionAPI) {
   pi.registerCommand("focus", {
     description: "Set and steer current work focus — use new | edit | delete | kb | on | expand | narrow | off | status",
     handler: async (args: string, ctx: CommandContext) => {
-      if (ctx.hasUI === false) {
+      const [sub = "", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+      const requiresUI = !["off", "status", "use", "on", "help"].includes(sub);
+      if (ctx.hasUI === false && requiresUI) {
         ctx.ui.notify("focus: interactive focus management is unavailable in this host", "warning");
         return;
       }
-      const [sub = "", ...rest] = args.trim().split(/\s+/).filter(Boolean);
       if (!sub) {
         await handleChooser(ctx, activateFocus, "", capabilities());
       } else if (sub === "new") {
@@ -278,16 +283,16 @@ async function handleUse(ctx: CommandContext, idOrName: string, activateFocus: A
 function updateFocusStatus(ctx: CommandContext, state: FocusState, capabilities?: ReturnType<typeof activationCapabilities>): void {
   const focus = getActiveFocus(state);
   if (!focus) {
-    ctx.ui.setStatus("focus", undefined);
-    ctx.ui.setStatus("focus-capabilities", undefined);
-    ctx.ui.setTitle?.("pi");
+    try { ctx.ui.setStatus("focus", undefined); } catch {}
+    try { ctx.ui.setStatus("focus-capabilities", undefined); } catch {}
+    try { ctx.ui.setTitle?.("pi"); } catch {}
     return;
   }
-  ctx.ui.setStatus("focus", ctx.ui.theme.fg("accent", `focus:${focus.name}`));
+  try { ctx.ui.setStatus("focus", ctx.ui.theme.fg("accent", `focus:${focus.name}`)); } catch {}
   if (capabilities) {
-    ctx.ui.setStatus("focus-capabilities", `focus: loadout_profile ${capabilities.loadoutProfile.status}; process ${capabilities.process.status}; subagent ${capabilities.subagent.status}`);
+    try { ctx.ui.setStatus("focus-capabilities", `focus: loadout_profile ${capabilities.loadoutProfile.status}; process ${capabilities.process.status}; subagent ${capabilities.subagent.status}`); } catch {}
   }
-  ctx.ui.setTitle?.(`pi — ${focus.name}`);
+  try { ctx.ui.setTitle?.(`pi — ${focus.name}`); } catch {}
 }
 
 function sendFocusMessage(pi: ExtensionAPI, ctx: CommandContext, message: string): void {
@@ -306,13 +311,28 @@ async function handleEdit(ctx: CommandContext, capabilities: ReturnType<typeof a
     ctx.ui.notify("focus: no active focus to edit", "warning");
     return;
   }
-  const field = await ctx.ui.select("Edit focus", ["Goals", "Scope", "Constraints", "Planning docs", "Refs", "Tool declarations"]);
+  const fields = ["Goals", "Scope", "Constraints", "Planning docs", "Refs", "Tool declarations", "Loadout preset", "Monitor declarations", "Script declarations", "Agent declarations"];
+  const field = await ctx.ui.select("Edit focus", fields);
   if (!field) return;
-  const key = field === "Planning docs" ? "planningDocs" : field === "Tool declarations" ? "activation" : field.toLowerCase();
-  const initial = key === "activation" ? (focus.activation?.tools ?? []).join("\n") : String(focus[key] ?? "");
+  const key = field === "Planning docs" ? "planningDocs" : field.toLowerCase();
+  const activationKey = ({
+    "Tool declarations": "tools",
+    "Loadout preset": "loadoutPreset",
+    "Monitor declarations": "monitors",
+    "Script declarations": "scripts",
+    "Agent declarations": "agents",
+  } as Record<string, keyof FocusActivation>)[field];
+  const initial = activationKey === "loadoutPreset"
+    ? focus.activation?.loadoutPreset ?? ""
+    : activationKey
+      ? (focus.activation?.[activationKey] ?? []).join("\n")
+      : String(focus[key] ?? "");
   const value = await ctx.ui.editor(field, initial);
   if (value === undefined) return;
-  const state = updateFocusState(ctx.cwd, (current: FocusState) => updateFocus(current, focus.id, key === "activation" ? { activation: { tools: value.split(/[\n,]/) } } : { [key]: value })) as FocusState;
+  const input = activationKey
+    ? { activation: { [activationKey]: activationKey === "loadoutPreset" ? value : value.split(/[\n,]/) } }
+    : { [key]: value };
+  const state = updateFocusState(ctx.cwd, (current: FocusState) => updateFocus(current, focus.id, input)) as FocusState;
   updateFocusStatus(ctx, state, capabilities);
   ctx.ui.notify(`focus: updated ${field.toLowerCase()}`, "info");
 }
@@ -327,9 +347,20 @@ async function handleDelete(ctx: CommandContext, capabilities: ReturnType<typeof
   const selected = await ctx.ui.select("Delete focus", options);
   const focus = state.foci[options.indexOf(selected ?? "")];
   if (!focus) return;
+  const createdAt = focus.createdAt;
   const confirmed = await ctx.ui.select(`Delete “${focus.name}”?`, ["Cancel", `Delete “${focus.name}”`]);
   if (confirmed !== `Delete “${focus.name}”`) return;
-  const next = updateFocusState(ctx.cwd, (current: FocusState) => deleteFocus(current, focus.id)) as FocusState;
+  let next: FocusState;
+  try {
+    next = updateFocusState(ctx.cwd, (current: FocusState) => {
+      const selected = current.foci.find((item) => item.id === focus.id);
+      if (!selected || selected.createdAt !== createdAt) throw new Error("focus: delete selection is stale");
+      return deleteFocus(current, focus.id);
+    }) as FocusState;
+  } catch (error) {
+    ctx.ui.notify(`focus: ${(error as Error).message}`, "warning");
+    return;
+  }
   removeFocusDirectory(ctx.cwd, focus.id);
   updateFocusStatus(ctx, next, capabilities);
   ctx.ui.notify(`focus: deleted ${focus.name}`, "info");

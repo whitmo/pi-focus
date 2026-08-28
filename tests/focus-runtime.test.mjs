@@ -54,6 +54,26 @@ test("buildFocusContext has a hard total bound even with many oversized fields",
   assert.ok(context.length <= 4_000);
 });
 
+test("buildFocusContext renders inert runbook declarations", async () => {
+  const { activationCapabilities, buildFocusContext } = await runtime();
+  const context = buildFocusContext({
+    ...focus,
+    activation: {
+      tools: ["read"],
+      loadoutPreset: "team-default",
+      monitors: ["watch CI"],
+      scripts: ["refresh fixtures"],
+      agents: ["reviewer"],
+    },
+  }, paths, activationCapabilities(["read"], ["read"]));
+
+  assert.match(context, /Loadout preset intent: team-default/);
+  assert.match(context, /Monitor runbooks: watch CI/);
+  assert.match(context, /Script runbooks: refresh fixtures/);
+  assert.match(context, /Agent runbooks: reviewer/);
+  assert.match(context, /do not run loadouts, processes, scripts, or subagents/);
+});
+
 test("resolveToolPolicy distinguishes absent, allowed, and unavailable declarations", async () => {
   const { resolveToolPolicy } = await runtime();
 

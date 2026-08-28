@@ -2,6 +2,7 @@ export function createEmptyState() {
   return {
     activeFocusId: null,
     lastFocusId: null,
+    retiredFocusIds: [],
     foci: [],
     updatedAt: null,
   };
@@ -14,6 +15,7 @@ export function normalizeFocusState(state) {
   return {
     activeFocusId: nullableString(state.activeFocusId, "activeFocusId"),
     lastFocusId: nullableString(state.lastFocusId, "lastFocusId"),
+    retiredFocusIds: normalizeFocusIds(state.retiredFocusIds),
     foci: (state.foci ?? []).map(normalizeFocus),
     updatedAt: nullableString(state.updatedAt, "updatedAt"),
   };
@@ -21,7 +23,7 @@ export function normalizeFocusState(state) {
 
 export function createFocus(state, input, now = new Date().toISOString()) {
   const normalized = normalizeFocusState(state);
-  const id = uniqueId(slugify(input?.name), normalized.foci.map((focus) => focus.id));
+  const id = uniqueId(slugify(input?.name), [...normalized.foci.map((focus) => focus.id), ...normalized.retiredFocusIds]);
   const focus = normalizeFocus({
     id,
     name: clean(input?.name),
@@ -51,6 +53,9 @@ export function updateFocus(state, id, input, now = new Date().toISOString()) {
   const normalized = normalizeFocusState(state);
   const existing = normalized.foci.find((focus) => focus.id === id);
   if (!existing) throw new Error(`Unknown focus: ${id}`);
+  if (input?.activation !== undefined && !isRecord(input.activation)) {
+    throw new Error("focus: invalid activation metadata");
+  }
 
   const replacement = normalizeFocus({
     ...existing,
@@ -61,7 +66,7 @@ export function updateFocus(state, id, input, now = new Date().toISOString()) {
     planningDocs: input?.planningDocs === undefined ? existing.planningDocs : cleanList(input.planningDocs),
     refs: input?.refs === undefined ? existing.refs : cleanList(input.refs),
     notes: input?.notes === undefined ? existing.notes : cleanList(input.notes),
-    activation: input?.activation === undefined ? existing.activation : cleanActivation(input.activation),
+    activation: input?.activation === undefined ? existing.activation : cleanActivation({ ...existing.activation, ...input.activation }),
     updatedAt: now,
   });
 
@@ -80,6 +85,7 @@ export function deleteFocus(state, id, now = new Date().toISOString()) {
     ...normalized,
     activeFocusId: normalized.activeFocusId === id ? null : normalized.activeFocusId,
     lastFocusId: normalized.lastFocusId === id ? null : normalized.lastFocusId,
+    retiredFocusIds: [...new Set([...normalized.retiredFocusIds, id])],
     foci: normalized.foci.filter((focus) => focus.id !== id),
     updatedAt: now,
   };
@@ -228,14 +234,43 @@ function updateActiveFocus(state, now, update) {
   };
 }
 
+const MAX_ACTIVATION_FIELD_LENGTH = 500;
+const MAX_ACTIVATION_LIST_ITEMS = 8;
+
 function cleanActivation(value) {
   if (value === undefined) return undefined;
   if (!isRecord(value)) throw new Error("focus: invalid activation metadata");
-  if (value.tools === undefined) return undefined;
-  if (!Array.isArray(value.tools) || value.tools.some((tool) => typeof tool !== "string")) {
-    throw new Error("focus: invalid activation metadata");
+
+  const activation = {};
+  if (value.tools !== undefined) {
+    if (!Array.isArray(value.tools) || value.tools.some((tool) => typeof tool !== "string")) {
+      throw new Error("focus: invalid activation metadata");
+    }
+    activation.tools = value.tools.map(clean).filter(Boolean);
   }
-  return { tools: value.tools.map(clean).filter(Boolean) };
+  if (value.loadoutPreset !== undefined) {
+    if (typeof value.loadoutPreset !== "string") throw new Error("focus: invalid activation metadata");
+    const loadoutPreset = bounded(value.loadoutPreset);
+    if (loadoutPreset) activation.loadoutPreset = loadoutPreset;
+  }
+  for (const key of ["monitors", "scripts", "agents"]) {
+    if (value[key] === undefined) continue;
+    if (!Array.isArray(value[key]) || value[key].some((item) => typeof item !== "string")) {
+      throw new Error("focus: invalid activation metadata");
+    }
+    activation[key] = value[key].map(bounded).filter(Boolean).slice(0, MAX_ACTIVATION_LIST_ITEMS);
+  }
+  return Object.keys(activation).length ? activation : undefined;
+}
+
+function normalizeFocusIds(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some((id) => !validId(id))) throw new Error("focus: invalid state schema");
+  return [...new Set(value)];
+}
+
+function bounded(value) {
+  return clean(value).slice(0, MAX_ACTIVATION_FIELD_LENGTH);
 }
 
 function nullableString(value, name) {
