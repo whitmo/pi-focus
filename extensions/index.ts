@@ -38,18 +38,25 @@ import {
   addFocusNote,
   createFocus,
   createSubfocus,
+  deleteFocus,
   findMatchingFoci,
   getActiveFocus,
   setActiveFocus,
   setFocusOff,
   summarizeFocus,
+  updateFocus,
 } from "./focus-core.mjs";
 // @ts-ignore JS helpers keep the extension testable with plain node:test.
 import {
+  deleteKnowledgeEntry,
   ensureFocusDirectories,
   focusDirectory,
+  listKnowledgeEntries,
   loadFocusState,
+  readKnowledgeEntry,
+  removeFocusDirectory,
   updateFocusState,
+  writeKnowledgeEntry,
 } from "./focus-store.mjs";
 // @ts-ignore JS helpers keep the extension testable with plain node:test.
 import {
@@ -135,11 +142,15 @@ export default function focusExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("focus", {
-    description: "Set and steer the current work focus — use new | on | expand | narrow | off | status",
+    description: "Set and steer current work focus — use new | edit | delete | kb | on | expand | narrow | off | status",
     handler: async (args: string, ctx: CommandContext) => {
+      if (ctx.hasUI === false) {
+        ctx.ui.notify("focus: interactive focus management is unavailable in this host", "warning");
+        return;
+      }
       const [sub = "", ...rest] = args.trim().split(/\s+/).filter(Boolean);
       if (!sub) {
-        await handleChooser(ctx, activateFocus);
+        await handleChooser(ctx, activateFocus, "", capabilities());
       } else if (sub === "new") {
         await handleNew(ctx, activateFocus);
       } else if (sub === "on") {
@@ -153,13 +164,19 @@ export default function focusExtension(pi: ExtensionAPI) {
         updateFocusStatus(ctx, state, capabilities());
         ctx.ui.notify("focus: off", "info");
       } else if (sub === "status") {
-        handleStatus(ctx);
+        handleStatus(ctx, capabilities());
+      } else if (sub === "edit") {
+        await handleEdit(ctx, capabilities());
+      } else if (sub === "delete") {
+        await handleDelete(ctx, capabilities());
+      } else if (sub === "kb") {
+        await handleKnowledgeBase(ctx);
       } else if (sub === "use") {
         await handleUse(ctx, rest.join(" "), activateFocus);
       } else if (sub === "help") {
         ctx.ui.notify(focusHelp(), "info");
       } else {
-        await handleChooser(ctx, activateFocus, [sub, ...rest].join(" "));
+        await handleChooser(ctx, activateFocus, [sub, ...rest].join(" "), capabilities());
       }
     },
   });
@@ -167,7 +184,7 @@ export default function focusExtension(pi: ExtensionAPI) {
 
 type ActivateFocus = (ctx: CommandContext, transition: (state: FocusState) => FocusState, steer: boolean) => Promise<void>;
 
-async function handleChooser(ctx: CommandContext, activateFocus: ActivateFocus, query = ""): Promise<void> {
+async function handleChooser(ctx: CommandContext, activateFocus: ActivateFocus, query = "", capabilities?: ReturnType<typeof activationCapabilities>): Promise<void> {
   const state = loadFocusState(ctx.cwd) as FocusState;
   const matches = query ? findMatchingFoci(state.foci, query) : [];
   const options = query
@@ -179,7 +196,7 @@ async function handleChooser(ctx: CommandContext, activateFocus: ActivateFocus, 
   const selected = await ctx.ui.select(query ? `Focus matches for “${query}”` : "Focus", options);
   if (!selected) return;
   if (!query) {
-    if (selected === options[0]) return handleStatus(ctx);
+    if (selected === options[0]) return handleStatus(ctx, capabilities);
     if (selected === options[1]) return handleSwitch(ctx, activateFocus);
     return handleNew(ctx, activateFocus);
   }
@@ -209,7 +226,7 @@ async function handleNew(ctx: CommandContext, activateFocus: ActivateFocus, supp
   const constraints = await ctx.ui.editor("Constraints", "What must stay true?");
   const planningDocs = await ctx.ui.editor("Planning docs", "One path or URL per line");
   const refs = await ctx.ui.editor("Tickets, PRs, repos", "One reference per line");
-  await activateFocus(ctx, (state) => createFocus(state, { name, goals, scope, constraints, planningDocs, refs }), false);
+  await activateFocus(ctx, (state) => createFocus(state, { name, goals, scope, constraints, planningDocs, refs }), true);
 }
 
 async function handleOn(ctx: CommandContext, activateFocus: ActivateFocus): Promise<void> {
@@ -258,7 +275,7 @@ async function handleUse(ctx: CommandContext, idOrName: string, activateFocus: A
     ctx.ui.notify(`focus: unknown focus ${idOrName || "(empty)"}`, "warning");
     return;
   }
-  await activateFocus(ctx, (current) => setActiveFocus(current, focus.id), false);
+  await activateFocus(ctx, (current) => setActiveFocus(current, focus.id), true);
 }
 
 function updateFocusStatus(ctx: CommandContext, state: FocusState, capabilities?: ReturnType<typeof activationCapabilities>): void {
@@ -291,22 +308,105 @@ function sendFocusMessage(pi: ExtensionAPI, ctx: CommandContext, message: string
   }
 }
 
-function handleStatus(ctx: CommandContext): void {
+async function handleEdit(ctx: CommandContext, capabilities: ReturnType<typeof activationCapabilities>): Promise<void> {
   const focus = getActiveFocus(loadFocusState(ctx.cwd) as FocusState);
-  ctx.ui.notify(focus ? summarizeFocus(focus) : "focus: off", "info");
+  if (!focus) {
+    ctx.ui.notify("focus: no active focus to edit", "warning");
+    return;
+  }
+  const field = await ctx.ui.select("Edit focus", ["Goals", "Scope", "Constraints", "Planning docs", "Refs", "Tool declarations"]);
+  if (!field) return;
+  const key = field === "Planning docs" ? "planningDocs" : field === "Tool declarations" ? "activation" : field.toLowerCase();
+  const initial = key === "activation" ? (focus.activation?.tools ?? []).join("\n") : String(focus[key] ?? "");
+  const value = await ctx.ui.editor(field, initial);
+  if (value === undefined) return;
+  const state = updateFocusState(ctx.cwd, (current: FocusState) => updateFocus(current, focus.id, key === "activation" ? { activation: { tools: value.split(/[\n,]/) } } : { [key]: value })) as FocusState;
+  updateFocusStatus(ctx, state, capabilities);
+  ctx.ui.notify(`focus: updated ${field.toLowerCase()}`, "info");
+}
+
+async function handleDelete(ctx: CommandContext, capabilities: ReturnType<typeof activationCapabilities>): Promise<void> {
+  const state = loadFocusState(ctx.cwd) as FocusState;
+  if (!state.foci.length) {
+    ctx.ui.notify("focus: no foci to delete", "warning");
+    return;
+  }
+  const options = state.foci.map((focus) => `${focus.name} (${focus.id})`);
+  const selected = await ctx.ui.select("Delete focus", options);
+  const focus = state.foci[options.indexOf(selected ?? "")];
+  if (!focus) return;
+  const confirmed = await ctx.ui.select(`Delete “${focus.name}”?`, ["Cancel", `Delete “${focus.name}”`]);
+  if (confirmed !== `Delete “${focus.name}”`) return;
+  const next = updateFocusState(ctx.cwd, (current: FocusState) => deleteFocus(current, focus.id)) as FocusState;
+  removeFocusDirectory(ctx.cwd, focus.id);
+  updateFocusStatus(ctx, next, capabilities);
+  ctx.ui.notify(`focus: deleted ${focus.name}`, "info");
+}
+
+async function handleKnowledgeBase(ctx: CommandContext): Promise<void> {
+  const focus = getActiveFocus(loadFocusState(ctx.cwd) as FocusState);
+  if (!focus) {
+    ctx.ui.notify("focus: no active focus knowledge base", "warning");
+    return;
+  }
+  const entries = listKnowledgeEntries(ctx.cwd, focus.id);
+  const selected = await ctx.ui.select("Focus knowledge base", [...entries, "Create new entry"]);
+  if (!selected) return;
+  if (selected === "Create new entry") {
+    const name = await ctx.ui.input("Knowledge entry name", "e.g. plan");
+    if (!name?.trim()) return;
+    const content = await ctx.ui.editor("Knowledge entry", "");
+    if (content === undefined) return;
+    writeKnowledgeEntry(ctx.cwd, focus.id, name, content);
+    ctx.ui.notify("focus: knowledge entry saved", "info");
+    return;
+  }
+  const action = await ctx.ui.select(`Knowledge: ${selected}`, ["Edit entry", "Delete entry"]);
+  if (action === "Edit entry") {
+    const content = await ctx.ui.editor(`Knowledge: ${selected}`, readKnowledgeEntry(ctx.cwd, focus.id, selected));
+    if (content === undefined) return;
+    writeKnowledgeEntry(ctx.cwd, focus.id, selected, content);
+    ctx.ui.notify("focus: knowledge entry saved", "info");
+    return;
+  }
+  if (action === "Delete entry") {
+    const confirmed = await ctx.ui.select(`Delete “${selected}”?`, ["Cancel", `Delete “${selected}”`]);
+    if (confirmed !== `Delete “${selected}”`) return;
+    deleteKnowledgeEntry(ctx.cwd, focus.id, selected);
+    ctx.ui.notify("focus: knowledge entry deleted", "info");
+  }
+}
+
+function handleStatus(ctx: CommandContext, capabilities?: ReturnType<typeof activationCapabilities>): void {
+  const focus = getActiveFocus(loadFocusState(ctx.cwd) as FocusState);
+  if (!focus) {
+    ctx.ui.notify("focus: off", "info");
+    return;
+  }
+  const paths = {
+    focus: focusDirectory(ctx.cwd, focus.id),
+    kb: `${focusDirectory(ctx.cwd, focus.id)}/kb`,
+    state: `${focusDirectory(ctx.cwd, focus.id)}/state`,
+  };
+  ctx.ui.notify(buildFocusContext(focus, paths, capabilities), "info");
 }
 
 function focusHelp(): string {
   return [
+    "focus context is injected automatically; loadout, monitor, script, and agent intents require explicit tool calls.",
+    "focus KB and state paths are project-local.",
     "focus commands:",
     "  /focus            choose current, existing, or new focus",
     "  /focus <query>    choose a matching focus or create a new focus",
     "  /focus new        create and activate a new focus",
     "  /focus on         return the agent to current/last focus",
+    "  /focus edit       edit active context or tool declarations",
+    "  /focus delete     delete a focus after confirmation",
+    "  /focus kb         manage active focus Markdown knowledge",
     "  /focus expand     append notes/refs/docs to active focus",
     "  /focus narrow     create an active subfocus",
     "  /focus use <id>   switch to an existing focus",
     "  /focus off        deactivate focus, keeping last focus",
-    "  /focus status     show active focus",
+    "  /focus status     show paths, restrictions, and capability availability",
   ].join("\n");
 }
