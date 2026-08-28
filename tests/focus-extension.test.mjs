@@ -32,11 +32,18 @@ test("registers focus command, skill resources, status, and context injection", 
     }],
   }));
 
+  mkdirSync(join(cwd, ".agents", "focus", "foci", "ship-feature", "kb"), { recursive: true });
+  writeFileSync(join(cwd, ".agents", "focus", "foci", "ship-feature", "kb", "sentinel.md"), "KB-SENTINEL-SECRET");
+
   const events = new Map();
   const commands = new Map();
+  const activeTools = ["read", "write", "bash", "loadout_profile"];
   const pi = {
     on(name, handler) { events.set(name, handler); },
     registerCommand(name, command) { commands.set(name, command); },
+    getActiveTools() { return [...activeTools]; },
+    getAllTools() { return activeTools.map((name) => ({ name })); },
+    setActiveTools(next) { activeTools.splice(0, activeTools.length, ...next); },
   };
 
   const mod = await jiti.import("../extensions/index.ts");
@@ -50,7 +57,7 @@ test("registers focus command, skill resources, status, and context injection", 
   const ctx = {
     cwd,
     ui: {
-      setStatus(_key, value) { status = value; },
+      setStatus(key, value) { if (key === "focus") status = value; },
       setTitle() {},
       theme: { fg(_color, text) { return `bright:${text}`; } },
     },
@@ -59,10 +66,154 @@ test("registers focus command, skill resources, status, and context injection", 
   events.get("session_start")({}, ctx);
   assert.equal(status, "bright:focus:Ship feature");
 
-  const result = events.get("before_agent_start")({ systemPrompt: "base" }, { cwd });
-  assert.match(result.systemPrompt, /## Current Focus/);
-  assert.match(result.systemPrompt, /Focus: Ship feature/);
-  assert.match(result.systemPrompt, /Goals: Finish implementation/);
+  const originalMessages = [{ role: "user", content: [{ type: "text", text: "keep me" }] }];
+  const first = events.get("context")({ messages: originalMessages }, { cwd });
+  const second = events.get("context")({ messages: originalMessages }, { cwd });
+  assert.deepEqual(originalMessages, [{ role: "user", content: [{ type: "text", text: "keep me" }] }]);
+  assert.equal(first.messages.length, 2);
+  assert.equal(second.messages.length, 2);
+  assert.equal(first.messages[0], originalMessages[0]);
+  assert.deepEqual(Object.keys(first.messages[1]).sort(), ["content", "customType", "display", "role", "timestamp"]);
+  assert.equal(first.messages[1].role, "custom");
+  assert.equal(first.messages[1].customType, "focus-context");
+  assert.equal(first.messages[1].display, false);
+  assert.equal(typeof first.messages[1].timestamp, "number");
+  assert.match(first.messages[1].content[0].text, /Project-provided goals: Finish implementation/);
+  assert.match(first.messages[1].content[0].text, /foci\/ship-feature\/state/);
+  assert.equal(first.messages[1].content[0].text.includes("KB-SENTINEL-SECRET"), false);
+});
+
+test("context reads the current disk state for each provider request without persisting or steering", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "focus-extension-context-"));
+  mkdirSync(join(cwd, ".agents", "focus"), { recursive: true });
+  const statePath = join(cwd, ".agents", "focus", "state.json");
+  writeFileSync(statePath, JSON.stringify({
+    activeFocusId: "first", lastFocusId: "first", updatedAt: null,
+    foci: [{ id: "first", name: "First", goals: "Initial", activation: { tools: ["read"] } }],
+  }));
+  const events = new Map();
+  let sent = 0;
+  let entries = 0;
+  const pi = {
+    on(name, handler) { events.set(name, handler); },
+    registerCommand() {},
+    sendUserMessage() { sent += 1; },
+    appendEntry() { entries += 1; },
+    getActiveTools() { return ["read", "write"]; },
+    getAllTools() { return [{ name: "read" }, { name: "write" }]; },
+    setActiveTools() {},
+  };
+  const mod = await jiti.import("../extensions/index.ts");
+  mod.default(pi);
+
+  const first = events.get("context")({ messages: [] }, { cwd });
+  assert.match(first.messages[0].content[0].text, /Initial/);
+  writeFileSync(statePath, JSON.stringify({
+    activeFocusId: "second", lastFocusId: "second", updatedAt: null,
+    foci: [{ id: "second", name: "Second", goals: "Changed", activation: { tools: ["write"] } }],
+  }));
+  const second = events.get("context")({ messages: [] }, { cwd });
+  assert.match(second.messages[0].content[0].text, /Changed/);
+  assert.equal(sent, 0);
+  assert.equal(entries, 0);
+  assert.equal(JSON.parse(readFileSync(statePath, "utf8")).sessionTools, undefined);
+});
+
+test("focus owns only its baseline tool restriction across loadouts, tree changes, and off", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "focus-extension-tools-"));
+  mkdirSync(join(cwd, ".agents", "focus"), { recursive: true });
+  const statePath = join(cwd, ".agents", "focus", "state.json");
+  writeFileSync(statePath, JSON.stringify({
+    activeFocusId: "one", lastFocusId: "one", updatedAt: null,
+    foci: [
+      { id: "one", name: "One", activation: { tools: ["read", "loadout_profile", "unknown"], loadout: "never-run", process: "never-run", subagent: "never-run" } },
+      { id: "two", name: "Two", activation: { tools: ["write"] } },
+    ],
+  }));
+  const events = new Map();
+  const commands = new Map();
+  const tools = ["read", "write", "bash", "loadout_profile"];
+  const original = [...tools];
+  let activeToolReads = 0;
+  const pi = {
+    on(name, handler) { events.set(name, handler); },
+    registerCommand(name, command) { commands.set(name, command); },
+    getActiveTools() { activeToolReads += 1; return [...tools]; },
+    getAllTools() { return original.map((name) => ({ name })); },
+    setActiveTools(next) { tools.splice(0, tools.length, ...next); },
+    sendUserMessage() { throw new Error("tool policy must not steer"); },
+    exec() { throw new Error("tool policy must not execute commands"); },
+    registerTool() { throw new Error("tool policy must not register resources"); },
+  };
+  const mod = await jiti.import("../extensions/index.ts");
+  mod.default(pi);
+  const statuses = new Map();
+  let waited = false;
+  const ctx = {
+    cwd,
+    async waitForIdle() { waited = true; },
+    ui: {
+      notify() {}, setStatus(key, value) { statuses.set(key, value); }, setTitle() {},
+      theme: { fg(_color, text) { return text; } },
+    },
+  };
+
+  events.get("session_start")({}, ctx);
+  assert.deepEqual(tools, ["read", "loadout_profile"]);
+  assert.match(statuses.get("focus-capabilities"), /process, subagent unavailable/);
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(statePath, "utf8"))).sort(), ["activeFocusId", "foci", "lastFocusId", "updatedAt"]);
+  assert.equal(events.get("tool_call")({ toolName: "bash" }, ctx).block, true);
+  assert.equal(events.get("tool_call")({ toolName: "read" }, ctx), undefined);
+
+  tools.splice(0, tools.length, ...original);
+  events.get("tool_result")({ toolName: "loadout_profile" }, ctx);
+  assert.deepEqual(tools, ["read", "loadout_profile"]);
+  tools.splice(0, tools.length, ...original);
+  events.get("before_agent_start")({ systemPrompt: "base" }, ctx);
+  assert.deepEqual(tools, ["read", "loadout_profile"]);
+
+  await commands.get("focus").handler("use two", ctx);
+  assert.equal(waited, true);
+  assert.equal(activeToolReads, 1);
+  assert.deepEqual(tools, ["write"]);
+
+  events.get("session_before_tree")({}, ctx);
+  assert.deepEqual(tools, original);
+  events.get("session_tree")({}, ctx);
+  assert.deepEqual(tools, ["write"]);
+  events.get("session_shutdown")({ reason: "reload" }, ctx);
+  assert.deepEqual(tools, original);
+  events.get("session_start")({ reason: "reload" }, ctx);
+  assert.deepEqual(tools, ["write"]);
+  events.get("session_shutdown")({ reason: "quit" }, ctx);
+  assert.deepEqual(tools, original);
+  await commands.get("focus").handler("off", ctx);
+  assert.deepEqual(tools, original);
+});
+
+test("an absent declaration preserves tools while an explicit empty declaration removes them", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "focus-extension-declarations-"));
+  mkdirSync(join(cwd, ".agents", "focus"), { recursive: true });
+  const events = new Map();
+  const tools = ["read", "write"];
+  const pi = {
+    on(name, handler) { events.set(name, handler); },
+    registerCommand() {},
+    getActiveTools() { return [...tools]; },
+    getAllTools() { return [{ name: "read" }, { name: "write" }]; },
+    setActiveTools(next) { tools.splice(0, tools.length, ...next); },
+  };
+  const mod = await jiti.import("../extensions/index.ts");
+  mod.default(pi);
+  const ctx = { cwd, ui: { notify() {}, setStatus() {}, setTitle() {}, theme: { fg(_color, text) { return text; } } } };
+
+  writeFileSync(join(cwd, ".agents", "focus", "state.json"), JSON.stringify({ activeFocusId: "none", lastFocusId: "none", updatedAt: null, foci: [{ id: "none", name: "None" }] }));
+  events.get("session_start")({}, ctx);
+  assert.deepEqual(tools, ["read", "write"]);
+  events.get("session_shutdown")({}, ctx);
+  writeFileSync(join(cwd, ".agents", "focus", "state.json"), JSON.stringify({ activeFocusId: "empty", lastFocusId: "empty", updatedAt: null, foci: [{ id: "empty", name: "Empty", activation: { tools: [] } }] }));
+  events.get("session_start")({}, ctx);
+  assert.deepEqual(tools, []);
 });
 
 test("/focus with no args opens a chooser and view reuses status behavior", async () => {
@@ -133,7 +284,7 @@ test("/focus switch chooses a non-active focus and sends the return message", as
       input: async () => undefined,
       editor: async () => undefined,
       notify() {},
-      setStatus(_key, value) { status = value; },
+      setStatus(key, value) { if (key === "focus") status = value; },
       setTitle() {},
       theme: { fg(_color, text) { return text; } },
     },
@@ -211,7 +362,7 @@ test("/focus query offers exact, related, and create choices", async () => {
       input: async () => undefined,
       editor: async () => undefined,
       notify() {},
-      setStatus(_key, value) { status = value; },
+      setStatus(key, value) { if (key === "focus") status = value; },
       setTitle() {},
       theme: { fg(_color, text) { return text; } },
     },
