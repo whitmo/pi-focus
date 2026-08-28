@@ -6,7 +6,10 @@ import {
   createEmptyState,
   createFocus,
   createSubfocus,
+  deleteFocus,
   getActiveFocus,
+  normalizeFocusState,
+  updateFocus,
   findMatchingFoci,
   setFocusOff,
 } from "../extensions/focus-core.mjs";
@@ -31,6 +34,50 @@ test("keeps exact matches and caps related matches at five in stored order", () 
     "related-4",
     "related-5",
   ]);
+});
+
+test("normalizes legacy focus records with safe activation defaults", () => {
+  const state = normalizeFocusState({
+    activeFocusId: "legacy",
+    lastFocusId: "legacy",
+    foci: [{ id: "legacy", name: "Legacy", goals: "Keep working" }],
+    updatedAt: "2026-08-28T00:00:00.000Z",
+  });
+
+  assert.deepEqual(state.foci[0].activation, undefined);
+  assert.equal(state.foci[0].subfocuses.length, 0);
+  assert.equal(state.foci[0].activeSubfocusId, null);
+});
+
+test("preserves intentional empty activation tools but strips executable fields", () => {
+  let state = createEmptyState();
+  state = createFocus(state, { name: "Basic" }, "2026-08-28T00:00:00.000Z");
+  assert.equal(state.foci[0].activation, undefined);
+
+  state = createFocus(state, {
+    name: "Restricted",
+    activation: { tools: [], command: "rm -rf /" },
+    command: "rm -rf /",
+    extensionPath: "/tmp/evil.mjs",
+    agent: { command: "evil" },
+  }, "2026-08-28T00:00:01.000Z");
+
+  assert.deepEqual(state.foci[1].activation, { tools: [] });
+  assert.equal("command" in state.foci[1], false);
+  assert.equal("extensionPath" in state.foci[1], false);
+  assert.equal("agent" in state.foci[1], false);
+});
+
+test("updates and deletes focus records without clearing unrelated IDs", () => {
+  let state = createEmptyState();
+  state = createFocus(state, { name: "First" }, "2026-08-28T00:00:00.000Z");
+  state = createFocus(state, { name: "Second" }, "2026-08-28T00:00:01.000Z");
+  state = updateFocus(state, "first", { goals: "Updated", command: "ignored" }, "2026-08-28T00:00:02.000Z");
+  state = deleteFocus(state, "first", "2026-08-28T00:00:03.000Z");
+
+  assert.deepEqual(state.foci.map((focus) => focus.id), ["second"]);
+  assert.equal(state.activeFocusId, "second");
+  assert.equal(state.lastFocusId, "second");
 });
 
 test("creates, expands, narrows, and deactivates focus state", () => {
