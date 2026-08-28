@@ -110,9 +110,11 @@ export default function focusExtension(pi: ExtensionAPI) {
 
   const activateFocus = async (ctx: CommandContext, transition: (state: FocusState) => FocusState, steer: boolean): Promise<void> => {
     await ctx.waitForIdle?.();
+    const priorState = loadFocusState(ctx.cwd) as FocusState;
     const priorTools = pi.getActiveTools?.();
     const priorPolicy = { originalBaseline, latestExternalTools, restrictedTools, ownsRestriction };
     let state: FocusState;
+    let stateChanged = false;
     try {
       state = updateFocusState(ctx.cwd, (current: FocusState) => {
         const next = transition(current);
@@ -120,10 +122,15 @@ export default function focusExtension(pi: ExtensionAPI) {
         if (nextFocus) ensureFocusDirectories(ctx.cwd, nextFocus.id);
         return next;
       }) as FocusState;
+      stateChanged = true;
       reapplyTools(ctx);
     } catch (error) {
-      if (priorTools && pi.setActiveTools) pi.setActiveTools(priorTools);
-      ({ originalBaseline, latestExternalTools, restrictedTools, ownsRestriction } = priorPolicy);
+      try {
+        if (stateChanged) updateFocusState(ctx.cwd, () => priorState);
+      } finally {
+        if (priorTools && pi.setActiveTools) pi.setActiveTools(priorTools);
+        ({ originalBaseline, latestExternalTools, restrictedTools, ownsRestriction } = priorPolicy);
+      }
       throw error;
     }
     const focus = getActiveFocus(state);

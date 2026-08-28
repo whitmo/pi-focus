@@ -378,3 +378,137 @@ test("/focus query offers exact, related, and create choices", async () => {
   assert.equal(status, "focus:Alligator");
   assert.match(message, /Return to this focus/);
 });
+
+test("switch directory failure preserves focus A and its runtime policy", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "focus-extension-directory-rollback-"));
+  mkdirSync(join(cwd, ".agents", "focus", "foci"), { recursive: true });
+  const statePath = join(cwd, ".agents", "focus", "state.json");
+  writeFileSync(statePath, JSON.stringify({
+    activeFocusId: "one", lastFocusId: "one", updatedAt: null,
+    foci: [
+      { id: "one", name: "One", activation: { tools: ["read"] } },
+      { id: "two", name: "Two", activation: { tools: ["bash"] } },
+    ],
+  }));
+  writeFileSync(join(cwd, ".agents", "focus", "foci", "two"), "not a directory");
+  const events = new Map();
+  const commands = new Map();
+  const tools = ["read", "bash"];
+  const pi = {
+    on(name, handler) { events.set(name, handler); },
+    registerCommand(name, command) { commands.set(name, command); },
+    getActiveTools() { return [...tools]; },
+    getAllTools() { return ["read", "bash"].map((name) => ({ name })); },
+    setActiveTools(next) { tools.splice(0, tools.length, ...next); },
+  };
+  const mod = await jiti.import("../extensions/index.ts");
+  mod.default(pi);
+  const ctx = { cwd, ui: { notify() {}, setStatus() {}, setTitle() {}, theme: { fg(_color, text) { return text; } } } };
+
+  events.get("session_start")({}, ctx);
+  await assert.rejects(commands.get("focus").handler("use two", ctx), /expected directory/);
+
+  assert.equal(JSON.parse(readFileSync(statePath, "utf8")).activeFocusId, "one");
+  assert.deepEqual(tools, ["read"]);
+  assert.equal(events.get("tool_call")({ toolName: "bash" }, ctx).block, true);
+  assert.equal(events.get("tool_call")({ toolName: "read" }, ctx), undefined);
+});
+
+test("switch tool application failure preserves focus A and its runtime policy", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "focus-extension-tool-rollback-"));
+  mkdirSync(join(cwd, ".agents", "focus"), { recursive: true });
+  const statePath = join(cwd, ".agents", "focus", "state.json");
+  writeFileSync(statePath, JSON.stringify({
+    activeFocusId: "one", lastFocusId: "one", updatedAt: null,
+    foci: [
+      { id: "one", name: "One", activation: { tools: ["read"] } },
+      { id: "two", name: "Two", activation: { tools: ["bash"] } },
+    ],
+  }));
+  const events = new Map();
+  const commands = new Map();
+  const tools = ["read", "bash"];
+  let failWriteOnce = true;
+  const pi = {
+    on(name, handler) { events.set(name, handler); },
+    registerCommand(name, command) { commands.set(name, command); },
+    getActiveTools() { return [...tools]; },
+    getAllTools() { return ["read", "bash"].map((name) => ({ name })); },
+    setActiveTools(next) {
+      tools.splice(0, tools.length, ...next);
+      if (failWriteOnce && JSON.stringify(next) === JSON.stringify(["bash"])) {
+        failWriteOnce = false;
+        throw new Error("setActiveTools failed");
+      }
+    },
+  };
+  const mod = await jiti.import("../extensions/index.ts");
+  mod.default(pi);
+  const ctx = { cwd, ui: { notify() {}, setStatus() {}, setTitle() {}, theme: { fg(_color, text) { return text; } } } };
+
+  events.get("session_start")({}, ctx);
+  await assert.rejects(commands.get("focus").handler("use two", ctx), /setActiveTools failed/);
+
+  assert.equal(JSON.parse(readFileSync(statePath, "utf8")).activeFocusId, "one");
+  assert.deepEqual(tools, ["read"]);
+  assert.equal(events.get("tool_call")({ toolName: "bash" }, ctx).block, true);
+  assert.equal(events.get("tool_call")({ toolName: "read" }, ctx), undefined);
+});
+
+test("external tool removals remain removed through reapply and focus off", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "focus-extension-removal-"));
+  mkdirSync(join(cwd, ".agents", "focus"), { recursive: true });
+  writeFileSync(join(cwd, ".agents", "focus", "state.json"), JSON.stringify({
+    activeFocusId: "one", lastFocusId: "one", updatedAt: null,
+    foci: [{ id: "one", name: "One", activation: { tools: ["read"] } }],
+  }));
+  const events = new Map();
+  const commands = new Map();
+  const tools = ["read", "bash"];
+  const pi = {
+    on(name, handler) { events.set(name, handler); },
+    registerCommand(name, command) { commands.set(name, command); },
+    getActiveTools() { return [...tools]; },
+    getAllTools() { return ["read", "bash"].map((name) => ({ name })); },
+    setActiveTools(next) { tools.splice(0, tools.length, ...next); },
+  };
+  const mod = await jiti.import("../extensions/index.ts");
+  mod.default(pi);
+  const ctx = { cwd, ui: { notify() {}, setStatus() {}, setTitle() {}, theme: { fg(_color, text) { return text; } } } };
+
+  events.get("session_start")({}, ctx);
+  tools.splice(0, tools.length);
+  events.get("before_agent_start")({}, ctx);
+  assert.deepEqual(tools, []);
+  await commands.get("focus").handler("off", ctx);
+  assert.deepEqual(tools, []);
+});
+
+test("external tool widening stays restricted and restores on focus off", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "focus-extension-widening-"));
+  mkdirSync(join(cwd, ".agents", "focus"), { recursive: true });
+  writeFileSync(join(cwd, ".agents", "focus", "state.json"), JSON.stringify({
+    activeFocusId: "one", lastFocusId: "one", updatedAt: null,
+    foci: [{ id: "one", name: "One", activation: { tools: ["read"] } }],
+  }));
+  const events = new Map();
+  const commands = new Map();
+  const tools = ["read", "bash"];
+  const pi = {
+    on(name, handler) { events.set(name, handler); },
+    registerCommand(name, command) { commands.set(name, command); },
+    getActiveTools() { return [...tools]; },
+    getAllTools() { return ["read", "bash", "extra"].map((name) => ({ name })); },
+    setActiveTools(next) { tools.splice(0, tools.length, ...next); },
+  };
+  const mod = await jiti.import("../extensions/index.ts");
+  mod.default(pi);
+  const ctx = { cwd, ui: { notify() {}, setStatus() {}, setTitle() {}, theme: { fg(_color, text) { return text; } } } };
+
+  events.get("session_start")({}, ctx);
+  tools.splice(0, tools.length, "read", "bash", "extra");
+  events.get("before_agent_start")({}, ctx);
+  assert.deepEqual(tools, ["read"]);
+  await commands.get("focus").handler("off", ctx);
+  assert.deepEqual(tools, ["read", "bash", "extra"]);
+});
