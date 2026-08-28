@@ -13,17 +13,17 @@ test("registers focus command, skill resources, status, and context injection", 
   const cwd = mkdtempSync(join(tmpdir(), "focus-extension-"));
   mkdirSync(join(cwd, ".agents", "focus"), { recursive: true });
   writeFileSync(join(cwd, ".agents", "focus", "state.json"), JSON.stringify({
-    activeFocusId: "ship-picker",
-    lastFocusId: "ship-picker",
+    activeFocusId: "ship-feature",
+    lastFocusId: "ship-feature",
     updatedAt: "2026-08-05T12:00:00.000Z",
     foci: [{
-      id: "ship-picker",
-      name: "Ship picker",
-      goals: "Fix selection",
-      scope: "iOS client",
+      id: "ship-feature",
+      name: "Ship feature",
+      goals: "Finish implementation",
+      scope: "Web app",
       constraints: "Small diff",
       planningDocs: ["plan.md"],
-      refs: ["PR #1"],
+      refs: ["Issue #1"],
       notes: [],
       subfocuses: [],
       activeSubfocusId: null,
@@ -57,22 +57,22 @@ test("registers focus command, skill resources, status, and context injection", 
   };
 
   events.get("session_start")({}, ctx);
-  assert.equal(status, "bright:focus:Ship picker");
+  assert.equal(status, "bright:focus:Ship feature");
 
   const result = events.get("before_agent_start")({ systemPrompt: "base" }, { cwd });
   assert.match(result.systemPrompt, /## Current Focus/);
-  assert.match(result.systemPrompt, /Focus: Ship picker/);
-  assert.match(result.systemPrompt, /Goals: Fix selection/);
+  assert.match(result.systemPrompt, /Focus: Ship feature/);
+  assert.match(result.systemPrompt, /Goals: Finish implementation/);
 });
 
 test("/focus with no args opens a chooser and view reuses status behavior", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "focus-extension-chooser-"));
   mkdirSync(join(cwd, ".agents", "focus"), { recursive: true });
   writeFileSync(join(cwd, ".agents", "focus", "state.json"), JSON.stringify({
-    activeFocusId: "ship-picker",
-    lastFocusId: "ship-picker",
+    activeFocusId: "ship-feature",
+    lastFocusId: "ship-feature",
     updatedAt: null,
-    foci: [{ id: "ship-picker", name: "Ship picker", goals: "Fix selection", notes: [] }],
+    foci: [{ id: "ship-feature", name: "Ship feature", goals: "Finish implementation", notes: [] }],
   }));
 
   const events = new Map();
@@ -104,7 +104,7 @@ test("/focus with no args opens a chooser and view reuses status behavior", asyn
   assert.equal(choices.length, 1);
   assert.equal(choices[0].options.length, 3);
   assert.match(choices[0].options[0], /view.*current focus/i);
-  assert.match(notices[0], /Focus: Ship picker/);
+  assert.match(notices[0], /Focus: Ship feature/);
 });
 
 test("/focus switch chooses a non-active focus and sends the return message", async () => {

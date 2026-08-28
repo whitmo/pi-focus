@@ -1,4 +1,8 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+type ExtensionAPI = {
+  on: (event: string, handler: (...args: any[]) => unknown) => void;
+  registerCommand: (name: string, command: { description: string; handler: (args: string, ctx: CommandContext) => Promise<void> }) => void;
+  sendUserMessage: (message: string, options?: { deliverAs: "followUp" }) => void;
+};
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -133,7 +137,7 @@ async function handleSwitch(ctx: CommandContext, pi: ExtensionAPI): Promise<void
 }
 
 async function handleNew(ctx: CommandContext, suppliedName?: string): Promise<void> {
-  const name = suppliedName ?? await ctx.ui.input("Focus name", "e.g. House rec rotation");
+  const name = suppliedName ?? await ctx.ui.input("Focus name", "e.g. Release planning");
   if (!name?.trim()) return;
 
   const goals = await ctx.ui.editor("Goals", "What are we trying to accomplish?");

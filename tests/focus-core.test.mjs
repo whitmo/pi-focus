@@ -37,20 +37,20 @@ test("creates, expands, narrows, and deactivates focus state", () => {
   let state = createEmptyState();
 
   state = createFocus(state, {
-    name: "House rec rotation",
-    goals: "Ship the picker fix",
-    scope: "iOS recommendation client",
+    name: "Release planning",
+    goals: "Ship the release checklist",
+    scope: "Web app",
     constraints: "Small diff only",
-    planningDocs: [".agents/projects/house-rec/plan.md"],
-    refs: ["PR #123"],
+    planningDocs: ["docs/release-plan.md"],
+    refs: ["Issue #123"],
   }, "2026-08-05T12:00:00.000Z");
 
-  assert.equal(state.activeFocusId, "house-rec-rotation");
-  assert.equal(state.lastFocusId, "house-rec-rotation");
-  assert.equal(getActiveFocus(state).name, "House rec rotation");
+  assert.equal(state.activeFocusId, "release-planning");
+  assert.equal(state.lastFocusId, "release-planning");
+  assert.equal(getActiveFocus(state).name, "Release planning");
 
-  state = addFocusNote(state, "Added Linear ENG-42", "2026-08-05T12:01:00.000Z");
-  assert.deepEqual(getActiveFocus(state).notes, ["Added Linear ENG-42"]);
+  state = addFocusNote(state, "Added issue #42", "2026-08-05T12:01:00.000Z");
+  assert.deepEqual(getActiveFocus(state).notes, ["Added issue #42"]);
 
   state = createSubfocus(state, {
     name: "PR review",
@@ -65,5 +65,5 @@ test("creates, expands, narrows, and deactivates focus state", () => {
 
   state = setFocusOff(state, "2026-08-05T12:03:00.000Z");
   assert.equal(state.activeFocusId, null);
-  assert.equal(state.lastFocusId, "house-rec-rotation");
+  assert.equal(state.lastFocusId, "release-planning");
 });
