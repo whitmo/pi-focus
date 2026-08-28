@@ -49,16 +49,21 @@ test("buildFocusContext has a hard total bound even with many oversized fields",
   assert.ok(context.length <= 4_000);
 });
 
-test("restrictTools preserves the baseline unless tools are explicitly declared", async () => {
-  const { restrictTools } = await runtime();
-  const baseline = ["read", "write", "bash", "loadout_profile"];
+test("resolveToolPolicy distinguishes absent, allowed, and unavailable declarations", async () => {
+  const { resolveToolPolicy } = await runtime();
 
-  assert.deepEqual(restrictTools(baseline, undefined, ["read", "write", "bash"]), baseline);
-  assert.deepEqual(restrictTools(baseline, [], baseline), []);
-  assert.deepEqual(
-    restrictTools(baseline, ["bash", "read", "missing"], ["read", "bash", "missing"]),
-    ["read", "bash"],
-  );
+  assert.equal(resolveToolPolicy(undefined, ["read"], ["read"]), null);
+  assert.deepEqual(resolveToolPolicy([], ["read"], ["read"]), {
+    declared: [], allowed: [], unavailable: [],
+  });
+  assert.deepEqual(resolveToolPolicy(["bash", "read", "bash", "missing"], ["read", "bash", "inactive"], ["read", "bash"]), {
+    declared: ["bash", "read", "missing"],
+    allowed: ["bash", "read"],
+    unavailable: ["missing"],
+  });
+  assert.deepEqual(resolveToolPolicy(["inactive"], ["inactive"], []), {
+    declared: ["inactive"], allowed: [], unavailable: ["inactive"],
+  });
 });
 
 test("activationCapabilities reports availability without invoking declared resources", async () => {

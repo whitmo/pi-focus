@@ -119,101 +119,65 @@ test("context reads the current disk state for each provider request without per
   assert.equal(JSON.parse(readFileSync(statePath, "utf8")).sessionTools, undefined);
 });
 
-test("focus owns only its baseline tool restriction across loadouts, tree changes, and off", async () => {
-  const cwd = mkdtempSync(join(tmpdir(), "focus-extension-tools-"));
+test("focus guard never mutates active tools across lifecycle activity", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "focus-extension-guard-lifecycle-"));
   mkdirSync(join(cwd, ".agents", "focus"), { recursive: true });
-  const statePath = join(cwd, ".agents", "focus", "state.json");
-  writeFileSync(statePath, JSON.stringify({
+  writeFileSync(join(cwd, ".agents", "focus", "state.json"), JSON.stringify({
     activeFocusId: "one", lastFocusId: "one", updatedAt: null,
     foci: [
-      { id: "one", name: "One", activation: { tools: ["read", "loadout_profile", "unknown"], loadout: "never-run", process: "never-run", subagent: "never-run" } },
-      { id: "two", name: "Two", activation: { tools: ["write"] } },
+      { id: "one", name: "One", activation: { tools: ["read"] } },
+      { id: "two", name: "Two", activation: { tools: ["bash"] } },
     ],
   }));
   const events = new Map();
   const commands = new Map();
-  const tools = ["read", "write", "bash", "loadout_profile"];
-  const original = [...tools];
-  let activeToolReads = 0;
+  const tools = ["read", "bash", "extra"];
+  let setActiveToolsCalls = 0;
   const pi = {
     on(name, handler) { events.set(name, handler); },
     registerCommand(name, command) { commands.set(name, command); },
-    getActiveTools() { activeToolReads += 1; return [...tools]; },
-    getAllTools() { return original.map((name) => ({ name })); },
-    setActiveTools(next) { tools.splice(0, tools.length, ...next); },
-    sendUserMessage() { throw new Error("tool policy must not steer"); },
-    exec() { throw new Error("tool policy must not execute commands"); },
-    registerTool() { throw new Error("tool policy must not register resources"); },
-  };
-  const mod = await jiti.import("../extensions/index.ts");
-  mod.default(pi);
-  const statuses = new Map();
-  let waited = false;
-  const ctx = {
-    cwd,
-    async waitForIdle() { waited = true; },
-    ui: {
-      notify() {}, setStatus(key, value) { statuses.set(key, value); }, setTitle() {},
-      theme: { fg(_color, text) { return text; } },
-    },
-  };
-
-  events.get("session_start")({}, ctx);
-  assert.deepEqual(tools, ["read", "loadout_profile"]);
-  assert.match(statuses.get("focus-capabilities"), /process, subagent unavailable/);
-  assert.deepEqual(Object.keys(JSON.parse(readFileSync(statePath, "utf8"))).sort(), ["activeFocusId", "foci", "lastFocusId", "updatedAt"]);
-  assert.equal(events.get("tool_call")({ toolName: "bash" }, ctx).block, true);
-  assert.equal(events.get("tool_call")({ toolName: "read" }, ctx), undefined);
-
-  tools.splice(0, tools.length, ...original);
-  events.get("tool_result")({ toolName: "loadout_profile" }, ctx);
-  assert.deepEqual(tools, ["read", "loadout_profile"]);
-  tools.splice(0, tools.length, ...original);
-  events.get("before_agent_start")({ systemPrompt: "base" }, ctx);
-  assert.deepEqual(tools, ["read", "loadout_profile"]);
-
-  await commands.get("focus").handler("use two", ctx);
-  assert.equal(waited, true);
-  assert.ok(activeToolReads >= 1);
-  assert.deepEqual(tools, ["write"]);
-
-  events.get("session_before_tree")({}, ctx);
-  assert.deepEqual(tools, original);
-  events.get("session_tree")({}, ctx);
-  assert.deepEqual(tools, ["write"]);
-  events.get("session_shutdown")({ reason: "reload" }, ctx);
-  assert.deepEqual(tools, original);
-  events.get("session_start")({ reason: "reload" }, ctx);
-  assert.deepEqual(tools, ["write"]);
-  events.get("session_shutdown")({ reason: "quit" }, ctx);
-  assert.deepEqual(tools, original);
-  await commands.get("focus").handler("off", ctx);
-  assert.deepEqual(tools, original);
-});
-
-test("an absent declaration preserves tools while an explicit empty declaration removes them", async () => {
-  const cwd = mkdtempSync(join(tmpdir(), "focus-extension-declarations-"));
-  mkdirSync(join(cwd, ".agents", "focus"), { recursive: true });
-  const events = new Map();
-  const tools = ["read", "write"];
-  const pi = {
-    on(name, handler) { events.set(name, handler); },
-    registerCommand() {},
     getActiveTools() { return [...tools]; },
-    getAllTools() { return [{ name: "read" }, { name: "write" }]; },
-    setActiveTools(next) { tools.splice(0, tools.length, ...next); },
+    getAllTools() { return ["read", "bash", "extra"].map((name) => ({ name })); },
+    setActiveTools() { setActiveToolsCalls += 1; throw new Error("focus must not mutate active tools"); },
   };
   const mod = await jiti.import("../extensions/index.ts");
   mod.default(pi);
   const ctx = { cwd, ui: { notify() {}, setStatus() {}, setTitle() {}, theme: { fg(_color, text) { return text; } } } };
 
-  writeFileSync(join(cwd, ".agents", "focus", "state.json"), JSON.stringify({ activeFocusId: "none", lastFocusId: "none", updatedAt: null, foci: [{ id: "none", name: "None" }] }));
   events.get("session_start")({}, ctx);
-  assert.deepEqual(tools, ["read", "write"]);
-  events.get("session_shutdown")({}, ctx);
-  writeFileSync(join(cwd, ".agents", "focus", "state.json"), JSON.stringify({ activeFocusId: "empty", lastFocusId: "empty", updatedAt: null, foci: [{ id: "empty", name: "Empty", activation: { tools: [] } }] }));
-  events.get("session_start")({}, ctx);
-  assert.deepEqual(tools, []);
+  await commands.get("focus").handler("use two", ctx);
+  await commands.get("focus").handler("off", ctx);
+  await commands.get("focus").handler("use one", ctx);
+
+  assert.equal(events.has("before_agent_start"), false);
+  assert.equal(events.has("tool_result"), false);
+  assert.equal(events.has("session_before_tree"), false);
+  assert.equal(events.has("session_tree"), false);
+  assert.equal(events.has("session_shutdown"), false);
+  assert.equal(setActiveToolsCalls, 0);
+  assert.deepEqual(tools, ["read", "bash", "extra"]);
+});
+
+test("guard allows absent declarations and blocks explicit empty declarations", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "focus-extension-declarations-"));
+  mkdirSync(join(cwd, ".agents", "focus"), { recursive: true });
+  const statePath = join(cwd, ".agents", "focus", "state.json");
+  const events = new Map();
+  const pi = {
+    on(name, handler) { events.set(name, handler); },
+    registerCommand() {},
+    getActiveTools() { return ["read", "write"]; },
+    getAllTools() { return [{ name: "read" }, { name: "write" }]; },
+  };
+  const mod = await jiti.import("../extensions/index.ts");
+  mod.default(pi);
+  const ctx = { cwd, ui: { notify() {}, setStatus() {}, setTitle() {}, theme: { fg(_color, text) { return text; } } } };
+
+  writeFileSync(statePath, JSON.stringify({ activeFocusId: "none", lastFocusId: "none", updatedAt: null, foci: [{ id: "none", name: "None" }] }));
+  assert.equal(events.get("tool_call")({ toolName: "read" }, ctx), undefined);
+  writeFileSync(statePath, JSON.stringify({ activeFocusId: "empty", lastFocusId: "empty", updatedAt: null, foci: [{ id: "empty", name: "Empty", activation: { tools: [] } }] }));
+  assert.equal(events.get("tool_call")({ toolName: "read" }, ctx).block, true);
+  assert.match(events.get("tool_call")({ toolName: "read" }, ctx).reason, /not declared/);
 });
 
 test("/focus with no args opens a chooser and view reuses status behavior", async () => {
@@ -399,7 +363,6 @@ test("switch directory failure preserves focus A and its runtime policy", async 
     registerCommand(name, command) { commands.set(name, command); },
     getActiveTools() { return [...tools]; },
     getAllTools() { return ["read", "bash"].map((name) => ({ name })); },
-    setActiveTools(next) { tools.splice(0, tools.length, ...next); },
   };
   const mod = await jiti.import("../extensions/index.ts");
   mod.default(pi);
@@ -409,13 +372,13 @@ test("switch directory failure preserves focus A and its runtime policy", async 
   await assert.rejects(commands.get("focus").handler("use two", ctx), /expected directory/);
 
   assert.equal(JSON.parse(readFileSync(statePath, "utf8")).activeFocusId, "one");
-  assert.deepEqual(tools, ["read"]);
+  assert.deepEqual(tools, ["read", "bash"]);
   assert.equal(events.get("tool_call")({ toolName: "bash" }, ctx).block, true);
   assert.equal(events.get("tool_call")({ toolName: "read" }, ctx), undefined);
 });
 
-test("switch tool application failure preserves focus A and its runtime policy", async () => {
-  const cwd = mkdtempSync(join(tmpdir(), "focus-extension-tool-rollback-"));
+test("switch status failure preserves focus A and guard policy", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "focus-extension-status-rollback-"));
   mkdirSync(join(cwd, ".agents", "focus"), { recursive: true });
   const statePath = join(cwd, ".agents", "focus", "state.json");
   writeFileSync(statePath, JSON.stringify({
@@ -428,87 +391,84 @@ test("switch tool application failure preserves focus A and its runtime policy",
   const events = new Map();
   const commands = new Map();
   const tools = ["read", "bash"];
-  let failWriteOnce = true;
+  let failStatus = false;
   const pi = {
     on(name, handler) { events.set(name, handler); },
     registerCommand(name, command) { commands.set(name, command); },
     getActiveTools() { return [...tools]; },
     getAllTools() { return ["read", "bash"].map((name) => ({ name })); },
-    setActiveTools(next) {
-      tools.splice(0, tools.length, ...next);
-      if (failWriteOnce && JSON.stringify(next) === JSON.stringify(["bash"])) {
-        failWriteOnce = false;
-        throw new Error("setActiveTools failed");
-      }
+  };
+  const mod = await jiti.import("../extensions/index.ts");
+  mod.default(pi);
+  const ctx = {
+    cwd,
+    ui: {
+      notify() {}, setStatus() { if (failStatus) throw new Error("setStatus failed"); }, setTitle() {},
+      theme: { fg(_color, text) { return text; } },
     },
   };
-  const mod = await jiti.import("../extensions/index.ts");
-  mod.default(pi);
-  const ctx = { cwd, ui: { notify() {}, setStatus() {}, setTitle() {}, theme: { fg(_color, text) { return text; } } } };
 
   events.get("session_start")({}, ctx);
-  await assert.rejects(commands.get("focus").handler("use two", ctx), /setActiveTools failed/);
+  failStatus = true;
+  await assert.rejects(commands.get("focus").handler("use two", ctx), /setStatus failed/);
 
   assert.equal(JSON.parse(readFileSync(statePath, "utf8")).activeFocusId, "one");
-  assert.deepEqual(tools, ["read"]);
-  assert.equal(events.get("tool_call")({ toolName: "bash" }, ctx).block, true);
+  assert.deepEqual(tools, ["read", "bash"]);
   assert.equal(events.get("tool_call")({ toolName: "read" }, ctx), undefined);
+  assert.equal(events.get("tool_call")({ toolName: "bash" }, ctx).block, true);
 });
 
-test("external tool removals remain removed through reapply and focus off", async () => {
-  const cwd = mkdtempSync(join(tmpdir(), "focus-extension-removal-"));
+test("guard permits only declared active registered tools", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "focus-extension-guard-inventory-"));
   mkdirSync(join(cwd, ".agents", "focus"), { recursive: true });
   writeFileSync(join(cwd, ".agents", "focus", "state.json"), JSON.stringify({
     activeFocusId: "one", lastFocusId: "one", updatedAt: null,
-    foci: [{ id: "one", name: "One", activation: { tools: ["read"] } }],
+    foci: [{ id: "one", name: "One", activation: { tools: ["read", "inactive", "missing"] } }],
   }));
   const events = new Map();
-  const commands = new Map();
-  const tools = ["read", "bash"];
   const pi = {
     on(name, handler) { events.set(name, handler); },
-    registerCommand(name, command) { commands.set(name, command); },
-    getActiveTools() { return [...tools]; },
-    getAllTools() { return ["read", "bash"].map((name) => ({ name })); },
-    setActiveTools(next) { tools.splice(0, tools.length, ...next); },
+    registerCommand() {},
+    getActiveTools() { return ["read", "bash"]; },
+    getAllTools() { return ["read", "bash", "inactive"].map((name) => ({ name })); },
   };
   const mod = await jiti.import("../extensions/index.ts");
   mod.default(pi);
   const ctx = { cwd, ui: { notify() {}, setStatus() {}, setTitle() {}, theme: { fg(_color, text) { return text; } } } };
 
-  events.get("session_start")({}, ctx);
-  tools.splice(0, tools.length);
-  events.get("before_agent_start")({}, ctx);
-  assert.deepEqual(tools, []);
-  await commands.get("focus").handler("off", ctx);
-  assert.deepEqual(tools, []);
+  assert.equal(events.get("tool_call")({ toolName: "read" }, ctx), undefined);
+  assert.match(events.get("tool_call")({ toolName: "bash" }, ctx).reason, /not declared/);
+  assert.match(events.get("tool_call")({ toolName: "inactive" }, ctx).reason, /not active/);
+  assert.match(events.get("tool_call")({ toolName: "missing" }, ctx).reason, /not registered/);
 });
 
-test("external tool widening stays restricted and restores on focus off", async () => {
-  const cwd = mkdtempSync(join(tmpdir(), "focus-extension-widening-"));
+test("guard tracks external active sets without changing them", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "focus-extension-external-inventory-"));
   mkdirSync(join(cwd, ".agents", "focus"), { recursive: true });
   writeFileSync(join(cwd, ".agents", "focus", "state.json"), JSON.stringify({
     activeFocusId: "one", lastFocusId: "one", updatedAt: null,
-    foci: [{ id: "one", name: "One", activation: { tools: ["read"] } }],
+    foci: [{ id: "one", name: "One", activation: { tools: ["read", "bash"] } }],
   }));
   const events = new Map();
-  const commands = new Map();
-  const tools = ["read", "bash"];
+  const tools = ["read"];
   const pi = {
     on(name, handler) { events.set(name, handler); },
-    registerCommand(name, command) { commands.set(name, command); },
+    registerCommand() {},
     getActiveTools() { return [...tools]; },
     getAllTools() { return ["read", "bash", "extra"].map((name) => ({ name })); },
-    setActiveTools(next) { tools.splice(0, tools.length, ...next); },
   };
   const mod = await jiti.import("../extensions/index.ts");
   mod.default(pi);
   const ctx = { cwd, ui: { notify() {}, setStatus() {}, setTitle() {}, theme: { fg(_color, text) { return text; } } } };
 
-  events.get("session_start")({}, ctx);
-  tools.splice(0, tools.length, "read", "bash", "extra");
-  events.get("before_agent_start")({}, ctx);
+  assert.equal(events.get("tool_call")({ toolName: "read" }, ctx), undefined);
+  assert.match(events.get("tool_call")({ toolName: "bash" }, ctx).reason, /not active/);
   assert.deepEqual(tools, ["read"]);
-  await commands.get("focus").handler("off", ctx);
+  tools.splice(0, tools.length, "read", "bash", "extra");
+  assert.equal(events.get("tool_call")({ toolName: "bash" }, ctx), undefined);
+  assert.match(events.get("tool_call")({ toolName: "extra" }, ctx).reason, /not declared/);
   assert.deepEqual(tools, ["read", "bash", "extra"]);
+  tools.splice(0, tools.length);
+  assert.match(events.get("tool_call")({ toolName: "read" }, ctx).reason, /not active/);
+  assert.deepEqual(tools, []);
 });

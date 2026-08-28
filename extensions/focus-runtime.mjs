@@ -13,13 +13,14 @@ export function activationCapabilities(toolNames) {
   };
 }
 
-export function restrictTools(baseline, requested, registered) {
-  const original = [...new Set((baseline ?? []).map(toolName).filter(Boolean))];
-  if (requested === undefined) return original;
+export function resolveToolPolicy(requested, registered, active) {
+  if (requested === undefined) return null;
 
-  const allowed = new Set((requested ?? []).map(toolName).filter(Boolean));
+  const declared = [...new Set((requested ?? []).map(toolName).filter(Boolean))];
   const known = new Set((registered ?? []).map(toolName).filter(Boolean));
-  return original.filter((name) => allowed.has(name) && known.has(name));
+  const enabled = new Set((active ?? []).map(toolName).filter(Boolean));
+  const allowed = declared.filter((name) => known.has(name) && enabled.has(name));
+  return { declared, allowed, unavailable: declared.filter((name) => !allowed.includes(name)) };
 }
 
 export function buildFocusContext(focus, paths, capabilities) {
@@ -42,8 +43,9 @@ export function buildFocusContext(focus, paths, capabilities) {
     "",
     "Activation checklist:",
     `- Declared: ${declared === undefined ? "none" : list(declared)}`,
-    `- Available: ${declared === undefined ? "baseline unchanged" : list(declared.filter((name) => available.includes(name)))}`,
-    "- Requires explicit invocation: declarations only restrict available tools; they do not run loadouts, processes, subagents, reloads, discovery, or registration.",
+    `- Available: ${declared === undefined ? "no focus policy" : list(declared.filter((name) => available.includes(name)))}`,
+    `- Unavailable: ${declared === undefined ? "none" : list(declared.filter((name) => !available.includes(name)))}`,
+    "- Requires explicit invocation: declarations only guard currently active tools; they do not run loadouts, processes, subagents, reloads, discovery, or registration.",
     `- Optional capability status: loadout_profile ${capabilityText(capabilities?.loadoutProfile)}, process ${capabilityText(capabilities?.process)}, subagent ${capabilityText(capabilities?.subagent)}.`,
   ].filter(Boolean);
   const context = lines.join("\n");

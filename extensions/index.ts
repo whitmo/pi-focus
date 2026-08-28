@@ -8,7 +8,6 @@ type ExtensionAPI = {
   sendUserMessage?: (message: string, options?: { deliverAs: "followUp" }) => void;
   getActiveTools?: () => string[];
   getAllTools?: () => ToolInfo[];
-  setActiveTools?: (tools: string[]) => void;
 };
 
 type FocusState = {
@@ -56,63 +55,19 @@ import {
 import {
   activationCapabilities,
   buildFocusContext,
-  restrictTools,
+  resolveToolPolicy,
 } from "./focus-runtime.mjs";
 
 const SKILL_PARENT = fileURLToPath(new URL("../skills", import.meta.url));
 
 export default function focusExtension(pi: ExtensionAPI) {
-  let originalBaseline: string[] | undefined;
-  let latestExternalTools: string[] | undefined;
-  let restrictedTools: string[] | undefined;
-  let ownsRestriction = false;
-
   const registeredTools = (): string[] => pi.getAllTools?.().map((tool) => tool.name) ?? [];
-  const capabilities = () => activationCapabilities(registeredTools());
-
-  const observeExternalTools = (): void => {
-    if (!ownsRestriction || !pi.getActiveTools) return;
-    const current = pi.getActiveTools();
-    if (JSON.stringify(current) !== JSON.stringify(restrictedTools)) latestExternalTools = current;
-  };
-  const restoreTools = (): void => {
-    if (!ownsRestriction || latestExternalTools === undefined || !pi.setActiveTools) return;
-    observeExternalTools();
-    pi.setActiveTools(latestExternalTools);
-    originalBaseline = undefined;
-    latestExternalTools = undefined;
-    restrictedTools = undefined;
-    ownsRestriction = false;
-  };
-
-  const reapplyTools = (ctx: { cwd: string; ui?: CommandContext["ui"] }): FocusState => {
-    const state = loadFocusState(ctx.cwd) as FocusState;
-    const focus = getActiveFocus(state);
-    if (!focus || !pi.getActiveTools || !pi.setActiveTools) {
-      if (!focus) restoreTools();
-      updateFocusStatus(ctx as CommandContext, state, capabilities());
-      return state;
-    }
-
-    if (!ownsRestriction) {
-      originalBaseline = pi.getActiveTools();
-      latestExternalTools = originalBaseline;
-      ownsRestriction = true;
-    } else {
-      observeExternalTools();
-    }
-    const baselineRestriction = restrictTools(originalBaseline!, focus.activation?.tools, registeredTools());
-    restrictedTools = (latestExternalTools ?? []).filter((tool) => baselineRestriction.includes(tool));
-    pi.setActiveTools(restrictedTools);
-    updateFocusStatus(ctx as CommandContext, state, capabilities());
-    return state;
-  };
+  const activeTools = (): string[] => pi.getActiveTools?.() ?? [];
+  const capabilities = () => activationCapabilities(registeredTools().filter((name) => activeTools().includes(name)));
 
   const activateFocus = async (ctx: CommandContext, transition: (state: FocusState) => FocusState, steer: boolean): Promise<void> => {
     await ctx.waitForIdle?.();
     const priorState = loadFocusState(ctx.cwd) as FocusState;
-    const priorTools = pi.getActiveTools?.();
-    const priorPolicy = { originalBaseline, latestExternalTools, restrictedTools, ownsRestriction };
     let state: FocusState;
     let stateChanged = false;
     try {
@@ -123,14 +78,9 @@ export default function focusExtension(pi: ExtensionAPI) {
         return next;
       }) as FocusState;
       stateChanged = true;
-      reapplyTools(ctx);
+      updateFocusStatus(ctx, state, capabilities());
     } catch (error) {
-      try {
-        if (stateChanged) updateFocusState(ctx.cwd, () => priorState);
-      } finally {
-        if (priorTools && pi.setActiveTools) pi.setActiveTools(priorTools);
-        ({ originalBaseline, latestExternalTools, restrictedTools, ownsRestriction } = priorPolicy);
-      }
+      if (stateChanged) updateFocusState(ctx.cwd, () => priorState);
       throw error;
     }
     const focus = getActiveFocus(state);
@@ -139,7 +89,7 @@ export default function focusExtension(pi: ExtensionAPI) {
   };
 
   pi.on("session_start", (_event, ctx) => {
-    reapplyTools(ctx);
+    updateFocusStatus(ctx, loadFocusState(ctx.cwd) as FocusState, capabilities());
   });
 
   pi.on("resources_discover", () => ({ skillPaths: [SKILL_PARENT] }));
@@ -169,28 +119,19 @@ export default function focusExtension(pi: ExtensionAPI) {
     };
   });
 
-  pi.on("before_agent_start", (_event, ctx) => {
-    reapplyTools(ctx);
-  });
-
-  pi.on("tool_call", (event) => {
-    if (ownsRestriction && restrictedTools && !restrictedTools.includes(event.toolName)) {
-      return { block: true, reason: `focus: ${event.toolName} is outside the active focus tool restriction` };
+  pi.on("tool_call", (event, ctx) => {
+    const focus = getActiveFocus(loadFocusState(ctx.cwd) as FocusState);
+    const registered = registeredTools();
+    const active = activeTools();
+    const policy = resolveToolPolicy(focus?.activation?.tools, registered, active);
+    if (!policy || policy.allowed.includes(event.toolName)) return;
+    if (!policy.declared.includes(event.toolName)) {
+      return { block: true, reason: `focus: ${event.toolName} is not declared by the active focus` };
     }
-  });
-
-  pi.on("tool_result", (event, ctx) => {
-    if (event.toolName === "loadout_profile") reapplyTools(ctx);
-  });
-
-  pi.on("session_before_tree", () => {
-    restoreTools();
-  });
-  pi.on("session_tree", (_event, ctx) => {
-    reapplyTools(ctx);
-  });
-  pi.on("session_shutdown", () => {
-    restoreTools();
+    if (!registered.includes(event.toolName)) {
+      return { block: true, reason: `focus: ${event.toolName} is declared but not registered` };
+    }
+    return { block: true, reason: `focus: ${event.toolName} is declared but not active` };
   });
 
   pi.registerCommand("focus", {
@@ -209,7 +150,6 @@ export default function focusExtension(pi: ExtensionAPI) {
         await handleNarrow(ctx);
       } else if (sub === "off") {
         const state = updateFocusState(ctx.cwd, (current: FocusState) => setFocusOff(current)) as FocusState;
-        restoreTools();
         updateFocusStatus(ctx, state, capabilities());
         ctx.ui.notify("focus: off", "info");
       } else if (sub === "status") {
