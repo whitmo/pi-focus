@@ -174,7 +174,7 @@ test("focus owns only its baseline tool restriction across loadouts, tree change
 
   await commands.get("focus").handler("use two", ctx);
   assert.equal(waited, true);
-  assert.equal(activeToolReads, 1);
+  assert.ok(activeToolReads >= 1);
   assert.deepEqual(tools, ["write"]);
 
   events.get("session_before_tree")({}, ctx);

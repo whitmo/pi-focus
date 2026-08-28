@@ -62,17 +62,25 @@ import {
 const SKILL_PARENT = fileURLToPath(new URL("../skills", import.meta.url));
 
 export default function focusExtension(pi: ExtensionAPI) {
-  let baselineTools: string[] | undefined;
+  let originalBaseline: string[] | undefined;
+  let latestExternalTools: string[] | undefined;
   let restrictedTools: string[] | undefined;
   let ownsRestriction = false;
 
   const registeredTools = (): string[] => pi.getAllTools?.().map((tool) => tool.name) ?? [];
   const capabilities = () => activationCapabilities(registeredTools());
 
+  const observeExternalTools = (): void => {
+    if (!ownsRestriction || !pi.getActiveTools) return;
+    const current = pi.getActiveTools();
+    if (JSON.stringify(current) !== JSON.stringify(restrictedTools)) latestExternalTools = current;
+  };
   const restoreTools = (): void => {
-    if (!ownsRestriction || baselineTools === undefined || !pi.setActiveTools) return;
-    pi.setActiveTools(baselineTools);
-    baselineTools = undefined;
+    if (!ownsRestriction || latestExternalTools === undefined || !pi.setActiveTools) return;
+    observeExternalTools();
+    pi.setActiveTools(latestExternalTools);
+    originalBaseline = undefined;
+    latestExternalTools = undefined;
     restrictedTools = undefined;
     ownsRestriction = false;
   };
@@ -86,9 +94,15 @@ export default function focusExtension(pi: ExtensionAPI) {
       return state;
     }
 
-    baselineTools ??= pi.getActiveTools();
-    restrictedTools = restrictTools(baselineTools, focus.activation?.tools, registeredTools());
-    ownsRestriction = true;
+    if (!ownsRestriction) {
+      originalBaseline = pi.getActiveTools();
+      latestExternalTools = originalBaseline;
+      ownsRestriction = true;
+    } else {
+      observeExternalTools();
+    }
+    const baselineRestriction = restrictTools(originalBaseline!, focus.activation?.tools, registeredTools());
+    restrictedTools = (latestExternalTools ?? []).filter((tool) => baselineRestriction.includes(tool));
     pi.setActiveTools(restrictedTools);
     updateFocusStatus(ctx as CommandContext, state, capabilities());
     return state;
@@ -96,12 +110,24 @@ export default function focusExtension(pi: ExtensionAPI) {
 
   const activateFocus = async (ctx: CommandContext, transition: (state: FocusState) => FocusState, steer: boolean): Promise<void> => {
     await ctx.waitForIdle?.();
-    const state = updateFocusState(ctx.cwd, transition) as FocusState;
+    const priorTools = pi.getActiveTools?.();
+    const priorPolicy = { originalBaseline, latestExternalTools, restrictedTools, ownsRestriction };
+    let state: FocusState;
+    try {
+      state = updateFocusState(ctx.cwd, (current: FocusState) => {
+        const next = transition(current);
+        const nextFocus = getActiveFocus(next);
+        if (nextFocus) ensureFocusDirectories(ctx.cwd, nextFocus.id);
+        return next;
+      }) as FocusState;
+      reapplyTools(ctx);
+    } catch (error) {
+      if (priorTools && pi.setActiveTools) pi.setActiveTools(priorTools);
+      ({ originalBaseline, latestExternalTools, restrictedTools, ownsRestriction } = priorPolicy);
+      throw error;
+    }
     const focus = getActiveFocus(state);
     if (!focus) return;
-
-    ensureFocusDirectories(ctx.cwd, focus.id);
-    reapplyTools(ctx);
     if (steer) sendFocusMessage(pi, ctx, `Return to this focus and keep the next answer centered on it:\n\n${summarizeFocus(focus)}`);
   };
 
