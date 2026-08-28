@@ -234,14 +234,14 @@ function acquireLock(path, token) {
       return;
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
-      recoverStaleLock(path);
+      reportStaleLock(path);
       sleep(LOCK_RETRY_MS);
     }
   }
   throw new Error("focus: state lock is held; try again");
 }
 
-function recoverStaleLock(path) {
+function reportStaleLock(path) {
   try {
     assertNotSymlink(path);
   } catch (error) {
@@ -256,11 +256,8 @@ function recoverStaleLock(path) {
     if (error.code === "ENOENT") return;
     return;
   }
-  if (lock.hostname !== hostname() || !Number.isInteger(lock.pid) || typeof lock.createdAt !== "number" || Date.now() - lock.createdAt < STALE_LOCK_MS || processIsAlive(lock.pid)) return;
-  try {
-    unlinkSync(path);
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
+  if (lock.hostname === hostname() && Number.isInteger(lock.pid) && typeof lock.createdAt === "number" && Date.now() - lock.createdAt >= STALE_LOCK_MS && !processIsAlive(lock.pid)) {
+    throw new Error("focus: stale state lock detected; remove it after confirming no updater is running");
   }
 }
 

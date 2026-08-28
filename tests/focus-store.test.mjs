@@ -95,7 +95,7 @@ test("serializes concurrent state updates without losing either change", async (
   assert.equal(state.lastFocusId, "one");
 });
 
-test("releases a failed update lock and only recovers stale dead local locks", (t) => {
+test("releases a failed update lock and reports stale dead local locks", (t) => {
   const cwd = project();
   t.after(() => cleanup(cwd));
   const root = focusRoot(cwd);
@@ -105,6 +105,8 @@ test("releases a failed update lock and only recovers stale dead local locks", (
   assert.equal(loadFocusState(cwd).activeFocusId, "one");
 
   writeFileSync(join(root, ".state.lock"), JSON.stringify({ pid: 999999, token: "stale", hostname: hostname(), createdAt: 0 }));
+  assert.throws(() => updateFocusState(cwd, (current) => ({ ...current, lastFocusId: "one" })), /stale state lock detected/i);
+  rmSync(join(root, ".state.lock"));
   updateFocusState(cwd, (current) => ({ ...current, lastFocusId: "one" }));
   assert.equal(loadFocusState(cwd).lastFocusId, "one");
 
@@ -113,6 +115,39 @@ test("releases a failed update lock and only recovers stale dead local locks", (
   rmSync(join(root, ".state.lock"));
   writeFileSync(join(root, ".state.lock"), JSON.stringify({ pid: 999999, token: "hostless", createdAt: 0 }));
   assert.throws(() => updateFocusState(cwd, (current) => current), /state lock is held/i);
+  rmSync(join(root, ".state.lock"));
+});
+
+test("competing stale-lock reclaimers never enter callbacks", async (t) => {
+  const cwd = project();
+  t.after(() => cleanup(cwd));
+  const root = focusRoot(cwd);
+  const moduleUrl = new URL("../extensions/focus-store.mjs", import.meta.url).href;
+  const original = { pid: 999999, token: "original-stale-lock", hostname: hostname(), createdAt: 0 };
+  saveFocusState(cwd, { ...createEmptyState(), foci: [{ id: "one", name: "One" }] });
+  writeFileSync(join(root, ".state.lock"), JSON.stringify(original));
+
+  const children = ["first", "second"].map((label) => spawn(process.execPath, ["--input-type=module", "-e", `
+    import { writeFileSync } from 'node:fs';
+    import { join } from 'node:path';
+    import { updateFocusState } from ${JSON.stringify(moduleUrl)};
+    try {
+      updateFocusState(${JSON.stringify(cwd)}, (state) => {
+        writeFileSync(join(${JSON.stringify(cwd)}, 'callback-' + ${JSON.stringify(label)}), 'entered');
+        return { ...state, activeFocusId: 'one' };
+      });
+    } catch (error) {
+      writeFileSync(join(${JSON.stringify(cwd)}, 'error-' + ${JSON.stringify(label)}), error.message);
+    }
+  `]));
+  await Promise.all(children.map(exit));
+
+  for (const label of ["first", "second"]) {
+    assert.equal(existsSync(join(cwd, `callback-${label}`)), false);
+    assert.match(readFileSync(join(cwd, `error-${label}`), "utf8"), /stale state lock detected/i);
+  }
+  assert.deepEqual(loadFocusState(cwd), { ...createEmptyState(), foci: [{ id: "one", name: "One", goals: "", scope: "", constraints: "", planningDocs: [], refs: [], notes: [], subfocuses: [], activeSubfocusId: null, createdAt: null, updatedAt: null }] });
+  assert.deepEqual(JSON.parse(readFileSync(join(root, ".state.lock"), "utf8")), original);
   rmSync(join(root, ".state.lock"));
 });
 
