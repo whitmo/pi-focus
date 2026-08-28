@@ -51,6 +51,7 @@ import {
   deleteKnowledgeEntry,
   ensureFocusDirectories,
   focusDirectory,
+  focusRoot,
   listKnowledgeEntries,
   loadFocusState,
   readKnowledgeEntry,
@@ -70,7 +71,7 @@ const SKILL_PARENT = fileURLToPath(new URL("../skills", import.meta.url));
 export default function focusExtension(pi: ExtensionAPI) {
   const registeredTools = (): string[] => pi.getAllTools?.().map((tool) => tool.name) ?? [];
   const activeTools = (): string[] => pi.getActiveTools?.() ?? [];
-  const capabilities = () => activationCapabilities(registeredTools().filter((name) => activeTools().includes(name)));
+  const capabilities = () => activationCapabilities(registeredTools(), activeTools());
 
   const activateFocus = async (ctx: CommandContext, transition: (state: FocusState) => FocusState, steer: boolean): Promise<void> => {
     await ctx.waitForIdle?.();
@@ -106,11 +107,7 @@ export default function focusExtension(pi: ExtensionAPI) {
     const focus = getActiveFocus(state);
     if (!focus) return { messages: [...event.messages] };
 
-    const paths = {
-      focus: focusDirectory(ctx.cwd, focus.id),
-      kb: `${focusDirectory(ctx.cwd, focus.id)}/kb`,
-      state: `${focusDirectory(ctx.cwd, focus.id)}/state`,
-    };
+    const paths = focusPaths(ctx.cwd, focus.id);
     const text = buildFocusContext(focus, paths, capabilities());
     return {
       messages: [
@@ -288,12 +285,7 @@ function updateFocusStatus(ctx: CommandContext, state: FocusState, capabilities?
   }
   ctx.ui.setStatus("focus", ctx.ui.theme.fg("accent", `focus:${focus.name}`));
   if (capabilities) {
-    const unavailable = [
-      capabilities.loadoutProfile.available ? null : "loadout_profile",
-      capabilities.process.available ? null : "process",
-      capabilities.subagent.available ? null : "subagent",
-    ].filter(Boolean);
-    ctx.ui.setStatus("focus-capabilities", unavailable.length ? `focus: ${unavailable.join(", ")} unavailable; requires explicit invocation` : "focus: declared capabilities require explicit invocation");
+    ctx.ui.setStatus("focus-capabilities", `focus: loadout_profile ${capabilities.loadoutProfile.status}; process ${capabilities.process.status}; subagent ${capabilities.subagent.status}`);
   }
   ctx.ui.setTitle?.(`pi — ${focus.name}`);
 }
@@ -383,12 +375,17 @@ function handleStatus(ctx: CommandContext, capabilities?: ReturnType<typeof acti
     ctx.ui.notify("focus: off", "info");
     return;
   }
-  const paths = {
-    focus: focusDirectory(ctx.cwd, focus.id),
-    kb: `${focusDirectory(ctx.cwd, focus.id)}/kb`,
-    state: `${focusDirectory(ctx.cwd, focus.id)}/state`,
+  ctx.ui.notify(buildFocusContext(focus, focusPaths(ctx.cwd, focus.id), capabilities), "info");
+}
+
+function focusPaths(cwd: string, focusId: string): { focus: string; kb: string; stateIndex: string; focusState: string } {
+  const focus = focusDirectory(cwd, focusId);
+  return {
+    focus,
+    kb: `${focus}/kb`,
+    stateIndex: `${focusRoot(cwd)}/state.json`,
+    focusState: `${focus}/state`,
   };
-  ctx.ui.notify(buildFocusContext(focus, paths, capabilities), "info");
 }
 
 function focusHelp(): string {

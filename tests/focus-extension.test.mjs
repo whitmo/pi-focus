@@ -33,7 +33,9 @@ test("registers focus command, skill resources, status, and context injection", 
   }));
 
   mkdirSync(join(cwd, ".agents", "focus", "foci", "ship-feature", "kb"), { recursive: true });
+  mkdirSync(join(cwd, ".agents", "focus", "foci", "ship-feature", "state"), { recursive: true });
   writeFileSync(join(cwd, ".agents", "focus", "foci", "ship-feature", "kb", "sentinel.md"), "KB-SENTINEL-SECRET");
+  writeFileSync(join(cwd, ".agents", "focus", "foci", "ship-feature", "state", "sentinel.md"), "STATE-SENTINEL-SECRET");
 
   const events = new Map();
   const commands = new Map();
@@ -78,9 +80,15 @@ test("registers focus command, skill resources, status, and context injection", 
   assert.equal(first.messages[1].customType, "focus-context");
   assert.equal(first.messages[1].display, false);
   assert.equal(typeof first.messages[1].timestamp, "number");
-  assert.match(first.messages[1].content[0].text, /Project-provided goals: Finish implementation/);
-  assert.match(first.messages[1].content[0].text, /foci\/ship-feature\/state/);
-  assert.equal(first.messages[1].content[0].text.includes("KB-SENTINEL-SECRET"), false);
+  const context = first.messages[1].content[0].text;
+  assert.match(context, /Project-provided goals: Finish implementation/);
+  assert.ok(context.includes(`- Focus: ${join(cwd, ".agents", "focus", "foci", "ship-feature")}`));
+  assert.ok(context.includes(`- Knowledge base: ${join(cwd, ".agents", "focus", "foci", "ship-feature", "kb")}`));
+  assert.ok(context.includes(`- State index: ${join(cwd, ".agents", "focus", "state.json")}`));
+  assert.ok(context.includes(`- Focus state directory: ${join(cwd, ".agents", "focus", "foci", "ship-feature", "state")}`));
+  assert.equal(context.includes("\n- State:"), false);
+  assert.equal(context.includes("KB-SENTINEL-SECRET"), false);
+  assert.equal(context.includes("STATE-SENTINEL-SECRET"), false);
 });
 
 test("context reads the current disk state for each provider request without persisting or steering", async () => {
@@ -560,7 +568,7 @@ test("focus status is truthful and use/create share chooser activation", async (
   mkdirSync(join(cwd, ".agents", "focus"), { recursive: true });
   writeFileSync(join(cwd, ".agents", "focus", "state.json"), JSON.stringify({
     activeFocusId: "main", lastFocusId: "main", updatedAt: null,
-    foci: [{ id: "main", name: "Main", activation: { tools: ["read", "process"] } }],
+    foci: [{ id: "main", name: "Main", activation: { tools: ["read", "process", "subagent"] } }],
   }));
   const commands = new Map();
   const notices = [];
@@ -582,8 +590,15 @@ test("focus status is truthful and use/create share chooser activation", async (
 
   await commands.get("focus").handler("status", ctx);
   assert.match(notices[0], /Focus paths/);
-  assert.match(notices[0], /Knowledge base/);
-  assert.match(notices[0], /Declared: read, process/);
+  assert.ok(notices[0].includes(`- Focus: ${join(cwd, ".agents", "focus", "foci", "main")}`));
+  assert.ok(notices[0].includes(`- Knowledge base: ${join(cwd, ".agents", "focus", "foci", "main", "kb")}`));
+  assert.ok(notices[0].includes(`- State index: ${join(cwd, ".agents", "focus", "state.json")}`));
+  assert.ok(notices[0].includes(`- Focus state directory: ${join(cwd, ".agents", "focus", "foci", "main", "state")}`));
+  assert.equal(notices[0].includes("\n- State:"), false);
+  assert.match(notices[0], /Declared: read, process, subagent/);
+  assert.match(notices[0], /Active \+ registered: read/);
+  assert.match(notices[0], /Registered but inactive \(available for explicit activation\): process/);
+  assert.match(notices[0], /Unregistered\/unavailable: subagent/);
   assert.match(notices[0], /Requires explicit invocation/);
   assert.match(notices[0], /do not run loadouts/);
   await commands.get("focus").handler("use main", ctx);
