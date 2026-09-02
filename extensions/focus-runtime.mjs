@@ -1,10 +1,11 @@
+import { relative } from "node:path";
+
 const MAX_FIELD_LENGTH = 500;
 const MAX_LIST_ITEMS = 8;
 const MAX_CONTEXT_LENGTH = 4_000;
-const MAX_CONTAINER_CONTEXT_LENGTH = 1_500;
-const MAX_PATH_CONTEXT_LENGTH = 650;
-const MAX_ACTIVATION_CONTEXT_LENGTH = 800;
-const MAX_GUARD_CONTEXT_LENGTH = 700;
+const MAX_COMPACT_NAME_LENGTH = 200;
+const MAX_COMPACT_ROOT_LENGTH = 500;
+const MAX_COMPACT_PATH_LENGTH = 250;
 
 export function activationCapabilities(registeredToolNames, activeToolNames = registeredToolNames) {
   const registeredTools = names(registeredToolNames);
@@ -49,42 +50,45 @@ export function buildFocusContext(path, paths, capabilities) {
     capabilities?.registeredTools,
     capabilities?.activeTools,
   );
-  const sections = [
-    section("## Current Focus", [
-      ...containerContext("Focus", path.focus),
-      ...(path.subfocus ? containerContext("Subfocus", path.subfocus) : []),
-    ], MAX_CONTAINER_CONTEXT_LENGTH),
-    section("Focus paths (paths only; knowledge contents are not injected):", [
-      ...containerPaths("Focus", paths.focus),
-      ...(path.subfocus && paths.subfocus ? containerPaths("Subfocus", paths.subfocus) : []),
-    ], MAX_PATH_CONTEXT_LENGTH),
-    section("Activation declarations (inert):", [
-      ...activationLines("Focus", path.focus.activation),
-      ...(path.subfocus ? activationLines("Subfocus", path.subfocus.activation) : []),
-    ], MAX_ACTIVATION_CONTEXT_LENGTH),
-    section("Effective tool guard:", [
-      `- Effective declared tools: ${policy === null ? "none" : list(policy.declared)}`,
-      `- Active + registered: ${policy === null ? "no focus policy" : list(policy.allowed)}`,
-      `- Unavailable by host policy: ${policy === null ? "none" : list(policy.unavailable)}`,
-      "- Requires explicit invocation: declarations only guard currently active tools; they do not run loadouts, processes, scripts, or subagents.",
-      `- Optional capability status: loadout_profile ${capabilityText(capabilities?.loadoutProfile)}, process ${capabilityText(capabilities?.process)}, subagent ${capabilityText(capabilities?.subagent)}.`,
-    ], MAX_GUARD_CONTEXT_LENGTH),
+  const options = [
+    {},
+    { compactProse: true },
+    { compactProse: true, compactDeclarations: true },
+    { compactProse: true, compactDeclarations: true, compactPaths: true },
   ];
-  const context = sections.join("\n\n");
-  if (context.length > MAX_CONTEXT_LENGTH) {
-    throw new Error("focus: context budget exceeded");
+  for (const option of options) {
+    const context = renderContext(path, paths, capabilities, policy, option);
+    if (context.length <= MAX_CONTEXT_LENGTH) return context;
   }
-  return context;
+  throw new Error("focus: context budget exceeded");
 }
 
-function section(heading, lines, budget) {
-  const values = lines.filter(Boolean);
-  const lineLength = Math.floor((budget - values.length + 1) / values.length);
-  return [heading, ...values.map((value) => compactLine(value, lineLength))].join("\n");
+function renderContext(path, paths, capabilities, policy, options) {
+  const container = options.compactProse ? compactContainerContext : containerContext;
+  const activation = options.compactDeclarations ? compactActivationLines : activationLines;
+  const guard = options.compactDeclarations ? compactGuardLines : guardLines;
+  return [
+    section("## Current Focus", [
+      ...container("Focus", path.focus),
+      ...(path.subfocus ? container("Subfocus", path.subfocus) : []),
+    ]),
+    section("Focus paths (paths only; knowledge contents are not injected):",
+      options.compactPaths
+        ? compactContainerPaths(paths, Boolean(path.subfocus))
+        : [
+            ...containerPaths("Focus", paths.focus),
+            ...(path.subfocus && paths.subfocus ? containerPaths("Subfocus", paths.subfocus) : []),
+          ]),
+    section("Activation declarations (inert):", [
+      ...activation("Focus", path.focus.activation),
+      ...(path.subfocus ? activation("Subfocus", path.subfocus.activation) : []),
+    ]),
+    section("Effective tool guard:", guard(policy, capabilities)),
+  ].join("\n\n");
 }
 
-function compactLine(value, maxLength) {
-  return value.length > maxLength ? `${value.slice(0, maxLength - 1)}…` : value;
+function section(heading, lines) {
+  return [heading, ...lines.filter(Boolean)].join("\n");
 }
 
 function capability(name, registered, active) {
@@ -111,11 +115,47 @@ function containerContext(label, container) {
   ].filter(Boolean);
 }
 
+function compactContainerContext(label, container) {
+  const values = [
+    container.goals,
+    container.scope,
+    container.constraints,
+    ...(container.planningDocs ?? []),
+    ...(container.refs ?? []),
+    ...(container.notes ?? []),
+  ];
+  return [
+    compactLine(`${label}: ${field(container.name)}`, MAX_COMPACT_NAME_LENGTH),
+    `${label} captured revision: ${container.revision}`,
+    values.some((value) => field(value))
+      ? `Project-provided ${label.toLowerCase()} context: omitted to fit ${MAX_CONTEXT_LENGTH.toLocaleString("en-US")} characters.`
+      : "",
+  ].filter(Boolean);
+}
+
 function containerPaths(label, paths) {
   return [
     `- ${label}: ${paths.container}`,
     `- ${label} knowledge base: ${paths.kb}`,
     `- ${label} state directory: ${paths.state}`,
+  ];
+}
+
+function compactContainerPaths(paths, includeSubfocus) {
+  const root = paths.focus.container;
+  const relativePath = (value) => compactPath(relative(root, value) || ".", MAX_COMPACT_PATH_LENGTH);
+  return [
+    `- Shared absolute root: ${compactPath(root, MAX_COMPACT_ROOT_LENGTH)}`,
+    `- Focus container: ${relativePath(paths.focus.container)}`,
+    `- Focus knowledge base: ${relativePath(paths.focus.kb)}`,
+    `- Focus state directory: ${relativePath(paths.focus.state)}`,
+    ...(includeSubfocus && paths.subfocus
+      ? [
+          `- Subfocus container: ${relativePath(paths.subfocus.container)}`,
+          `- Subfocus knowledge base: ${relativePath(paths.subfocus.kb)}`,
+          `- Subfocus state directory: ${relativePath(paths.subfocus.state)}`,
+        ]
+      : []),
   ];
 }
 
@@ -129,6 +169,45 @@ function activationLines(label, activation = {}) {
   ];
 }
 
+function compactActivationLines(label, activation = {}) {
+  return [
+    `- ${label} tools: ${count(activation.tools, "tool")}`,
+    `- ${label} loadout preset intent: ${activation.loadoutPreset ? "set" : "none"}`,
+    `- ${label} monitor runbooks: ${count(activation.monitors, "runbook")}`,
+    `- ${label} script runbooks: ${count(activation.scripts, "runbook")}`,
+    `- ${label} agent runbooks: ${count(activation.agents, "runbook")}`,
+  ];
+}
+
+function guardLines(policy, capabilities) {
+  return [
+    `- Effective declared tools: ${policy === null ? "none" : list(policy.declared)}`,
+    `- Active + registered: ${policy === null ? "no focus policy" : list(policy.allowed)}`,
+    `- Unavailable by host policy: ${policy === null ? "none" : list(policy.unavailable)}`,
+    "- Requires explicit invocation: declarations only guard currently active tools; they do not run loadouts, processes, scripts, or subagents.",
+    `- Optional capability status: loadout_profile ${capabilityText(capabilities?.loadoutProfile)}, process ${capabilityText(capabilities?.process)}, subagent ${capabilityText(capabilities?.subagent)}.`,
+  ];
+}
+
+function compactGuardLines(policy, capabilities) {
+  return [
+    `- Effective declared tools: ${policy === null ? "none" : count(policy.declared, "tool")}`,
+    `- Active + registered: ${policy === null ? "no focus policy" : count(policy.allowed, "tool")}`,
+    `- Unavailable by host policy: ${policy === null ? "none" : count(policy.unavailable, "tool")}`,
+    ...guardLines(null, capabilities).slice(3),
+  ];
+}
+
+function compactLine(value, maxLength) {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 1)}…` : value;
+}
+
+function compactPath(value, maxLength) {
+  if (value.length <= maxLength) return value;
+  const left = Math.floor((maxLength - 1) / 2);
+  return `${value.slice(0, left)}…${value.slice(value.length - (maxLength - left - 1))}`;
+}
+
 function projectField(label, value) {
   const text = field(value);
   return text ? `Project-provided ${label}: ${text}` : "";
@@ -140,8 +219,13 @@ function projectList(label, values) {
 }
 
 function list(values) {
-  const items = (values ?? []).slice(0, MAX_LIST_ITEMS).map(field).filter(Boolean);
+  const items = (values ?? []).map(field).filter(Boolean);
   return items.length ? items.join(", ") : "none";
+}
+
+function count(values, singular) {
+  const total = values?.length ?? 0;
+  return total ? `${total} ${singular}${total === 1 ? "" : "s"}` : "none";
 }
 
 function field(value) {

@@ -157,6 +157,112 @@ test("buildFocusContext renders captured focus and subfocus data without reading
   assert.doesNotMatch(source, /focus-store|readKnowledgeEntry|listKnowledgeEntries/);
 });
 
+test("buildFocusContext preserves full long paths and declarations when the total fits", async () => {
+  const { activationCapabilities, buildFocusContext } = await runtime();
+  const focusId = `f${"a".repeat(199)}`;
+  const subfocusId = `s${"b".repeat(199)}`;
+  const tool = `tool-${"c".repeat(195)}`;
+  const longPath = normalizeFocusPathSnapshot({
+    focus: {
+      ...focus,
+      id: focusId,
+      name: "F",
+      goals: "",
+      scope: "",
+      constraints: "",
+      planningDocs: [],
+      refs: [],
+      notes: [],
+      activation: { tools: [tool] },
+    },
+    subfocus: {
+      ...subfocus,
+      id: subfocusId,
+      parentId: focusId,
+      name: "S",
+      goals: "",
+      scope: "",
+      constraints: "",
+      planningDocs: [],
+      refs: [],
+      notes: [],
+      activation: { tools: [tool] },
+    },
+  });
+  const focusContainer = `/work/project/.agents/focus/foci/${focusId}`;
+  const subfocusContainer = `${focusContainer}/subfoci/${subfocusId}`;
+  const longPaths = {
+    focus: {
+      container: focusContainer,
+      kb: `${focusContainer}/kb`,
+      state: `${focusContainer}/state`,
+    },
+    subfocus: {
+      container: subfocusContainer,
+      kb: `${subfocusContainer}/kb`,
+      state: `${subfocusContainer}/state`,
+    },
+  };
+  const context = buildFocusContext(longPath, longPaths, activationCapabilities([tool], [tool]));
+
+  for (const group of Object.values(longPaths)) {
+    for (const value of Object.values(group)) assert.ok(context.includes(value));
+  }
+  assert.match(context, new RegExp(`Focus tools: ${tool}`));
+  assert.match(context, new RegExp(`Subfocus tools: ${tool}`));
+  assert.match(context, new RegExp(`Effective declared tools: ${tool}`));
+  assert.doesNotMatch(context, /…/);
+  assert.ok(context.length <= 4_000);
+
+  const manyTools = Array.from({ length: 128 }, (_, index) => `tool-${index}`);
+  const oversizedPath = normalizeFocusPathSnapshot({
+    focus: {
+      ...longPath.focus,
+      goals: "G".repeat(500),
+      scope: "G".repeat(500),
+      constraints: "G".repeat(500),
+      activation: { tools: manyTools },
+    },
+    subfocus: {
+      ...longPath.subfocus,
+      goals: "S".repeat(500),
+      scope: "S".repeat(500),
+      constraints: "S".repeat(500),
+      activation: { tools: manyTools },
+    },
+  });
+  const absoluteRoot = `/${Array.from({ length: 40 }, (_, index) => `workspace-${index}`).join("/")}`;
+  const oversizedFocusContainer = `${absoluteRoot}/.agents/focus/foci/${focusId}`;
+  const oversizedSubfocusContainer = `${oversizedFocusContainer}/subfoci/${subfocusId}`;
+  const oversizedPaths = {
+    focus: {
+      container: oversizedFocusContainer,
+      kb: `${oversizedFocusContainer}/kb`,
+      state: `${oversizedFocusContainer}/state`,
+    },
+    subfocus: {
+      container: oversizedSubfocusContainer,
+      kb: `${oversizedSubfocusContainer}/kb`,
+      state: `${oversizedSubfocusContainer}/state`,
+    },
+  };
+  const compacted = buildFocusContext(
+    oversizedPath,
+    oversizedPaths,
+    activationCapabilities(manyTools, manyTools),
+  );
+
+  assert.match(compacted, /Focus captured revision: 3/);
+  assert.match(compacted, /Subfocus captured revision: 7/);
+  assert.match(compacted, /Shared absolute root:/);
+  assert.ok(compacted.includes(focusId));
+  assert.ok(compacted.includes(subfocusId));
+  assert.match(compacted, /Focus tools: 128 tools/);
+  assert.match(compacted, /Subfocus tools: 128 tools/);
+  assert.match(compacted, /Effective declared tools: 128 tools/);
+  assert.ok(compacted.length <= 4_000);
+});
+
 test("buildFocusContext preserves every required section for maximum-size focus and subfocus prose", async () => {
   const { activationCapabilities, buildFocusContext } = await runtime();
   const maximumFields = (container, token) => ({
