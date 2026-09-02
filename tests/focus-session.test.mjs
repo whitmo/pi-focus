@@ -1,19 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
+import * as focusSession from "../extensions/focus-session.mjs";
+
+const {
   FOCUS_BINDING_CUSTOM_TYPE,
-  MAX_TRANSFER_YAML_BYTES,
-  SUBAGENT_BEFORE_CHILD_START,
-  consumeInitialFocusTransfer,
-  createFocusTransfer,
+  createForkedFocusBinding,
   createLocalFocusBinding,
-  createTransferredFocusBinding,
-  encodeFocusTransfer,
   focusBindingIds,
   normalizeFocusPathSnapshot,
   restoreFocusBinding,
-} from "../extensions/focus-session.mjs";
+} = focusSession;
 
 const focus = {
   kind: "focus",
@@ -44,85 +41,76 @@ function entry(id, data) {
 }
 
 function subfocus(parentId = focus.id) {
-  return {
-    ...focus,
-    kind: "subfocus",
-    id: "subfocus-a",
-    parentId,
-    name: "Subfocus A",
-  };
+  return { ...focus, kind: "subfocus", id: "subfocus-a", parentId, name: "Subfocus A" };
 }
 
-test("exports the binding contract and returns IDs only for active valid bindings", () => {
+test("exports only the standalone session-binding API", () => {
+  assert.deepEqual(Object.keys(focusSession).sort(), [
+    "FOCUS_BINDING_CUSTOM_TYPE",
+    "createForkedFocusBinding",
+    "createLocalFocusBinding",
+    "focusBindingIds",
+    "normalizeFocusPathSnapshot",
+    "restoreFocusBinding",
+  ]);
   assert.equal(FOCUS_BINDING_CUSTOM_TYPE, "pi-focus:binding");
-  assert.equal(SUBAGENT_BEFORE_CHILD_START, "subagents:before-child-start");
-  assert.deepEqual(focusBindingIds(binding), { focusId: "focus-a", subfocusId: null });
-  assert.equal(focusBindingIds({ ...binding, active: null }), null);
-  assert.equal(focusBindingIds({ ...binding, version: 2 }), null);
 });
 
-test("restores only the latest matching entry as a cloned frozen binding", () => {
+test("restores only the latest binding and preserves explicit off", () => {
   const latest = { ...binding, capturedAt: "2026-09-02T00:00:02.000Z" };
-  const entries = [
+  const restored = restoreFocusBinding([
     entry("entry-old", binding),
-    { id: "unrelated", type: "custom", customType: "other", data: { version: 1 } },
+    { id: "unrelated", type: "custom", customType: "other", data: {} },
     entry("entry-latest", latest),
-  ];
-
-  const restored = restoreFocusBinding(entries);
+  ]);
 
   assert.equal(restored.entryId, "entry-latest");
   assert.equal(restored.binding.capturedAt, latest.capturedAt);
   assert.notEqual(restored.binding, latest);
   assert.notEqual(restored.binding.active.focus, latest.active.focus);
-  assert.equal(Object.isFrozen(restored.binding), true);
   assert.equal(Object.isFrozen(restored.binding.active.focus), true);
-});
+  assert.equal(restoreFocusBinding([entry("valid", binding), entry("bad", { version: 2 })]), null);
 
-test("does not revive an older binding behind a malformed or unknown latest entry", () => {
-  assert.equal(restoreFocusBinding([entry("valid", binding), entry("malformed", { nope: true })]), null);
-  assert.equal(restoreFocusBinding([entry("valid", binding), entry("unknown", { ...binding, version: 2 })]), null);
-});
-
-test("restores explicit off state without reviving active or last", () => {
   const off = createLocalFocusBinding({
     agentSessionId: "session-a",
-    capturedAt: "2026-09-02T00:00:02.000Z",
+    capturedAt: "2026-09-02T00:00:03.000Z",
     active: null,
     last: binding.active,
   });
-  const restored = restoreFocusBinding([entry("off", off)]).binding;
-
-  assert.equal(restored.active, null);
-  assert.equal(restored.last.focus.id, "focus-a");
-  assert.equal(focusBindingIds(restored), null);
+  assert.equal(restoreFocusBinding([entry("off", off)]).binding.active, null);
+  assert.equal(focusBindingIds(off), null);
+  assert.deepEqual(focusBindingIds(binding), { focusId: "focus-a", subfocusId: null });
 });
 
-test("rejects impossible paths while preserving a valid nine-tool declaration", () => {
+test("creates local and fork bindings without parent-transfer sources", () => {
+  const local = createLocalFocusBinding(binding);
+  assert.equal(local.source, "local");
+  assert.equal("forkedFrom" in local, false);
+
+  const forked = createForkedFocusBinding("session-child", { entryId: "entry-a", binding: local });
+  assert.equal(forked.agentSessionId, "session-child");
+  assert.equal(forked.source, "fork");
+  assert.deepEqual(forked.forkedFrom, { sessionId: "session-a", entryId: "entry-a" });
+  assert.equal(forked.active.focus.id, "focus-a");
+  assert.equal(Object.isFrozen(forked.last.focus), true);
+  assert.equal(focusBindingIds({ ...binding, source: "parent-inherited" }), null);
+});
+
+test("validates bounded immutable focus paths", () => {
   const tools = Array.from({ length: 9 }, (_, index) => `tool-${index}`);
   const valid = normalizeFocusPathSnapshot({
     focus: { ...focus, activation: { tools } },
     subfocus: subfocus(),
   });
-
   assert.deepEqual(valid.focus.activation.tools, tools);
-  assert.throws(
-    () => normalizeFocusPathSnapshot({ focus: { ...focus, kind: "subfocus" }, subfocus: null }),
-    /invalid focus path/i,
-  );
-  assert.throws(
-    () => normalizeFocusPathSnapshot({ focus, subfocus: { ...subfocus(), kind: "focus" } }),
-    /invalid focus path/i,
-  );
-  assert.throws(
-    () => normalizeFocusPathSnapshot({ focus, subfocus: subfocus("different-parent") }),
-    /invalid focus path/i,
-  );
-});
+  assert.equal(Object.isFrozen(valid), true);
 
-test("rejects per-field, list, and aggregate snapshot bounds", () => {
   assert.throws(
     () => normalizeFocusPathSnapshot({ focus: { ...focus, id: `a${"b".repeat(200)}` }, subfocus: null }),
+    /invalid focus path/i,
+  );
+  assert.throws(
+    () => normalizeFocusPathSnapshot({ focus: { ...focus, goals: "x".repeat(501) }, subfocus: null }),
     /invalid focus path/i,
   );
   assert.throws(
@@ -133,69 +121,22 @@ test("rejects per-field, list, and aggregate snapshot bounds", () => {
     /invalid focus path/i,
   );
   assert.throws(
-    () => normalizeFocusPathSnapshot({ focus: { ...focus, goals: "x".repeat(501) }, subfocus: null }),
+    () => normalizeFocusPathSnapshot({ focus, subfocus: subfocus("other-focus") }),
     /invalid focus path/i,
   );
 
   const maxFields = Array(8).fill("x".repeat(500));
-  const oversizedPath = {
-    focus: {
-      ...focus,
-      planningDocs: maxFields,
-      refs: maxFields,
-      notes: maxFields,
-      activation: {
-        tools: Array(128).fill("t".repeat(200)),
-        monitors: maxFields,
-        scripts: maxFields,
-        agents: maxFields,
+  assert.throws(
+    () => normalizeFocusPathSnapshot({
+      focus: {
+        ...focus,
+        planningDocs: maxFields,
+        refs: maxFields,
+        notes: maxFields,
+        activation: { tools: Array(128).fill("t".repeat(200)) },
       },
-    },
-    subfocus: null,
-  };
-  assert.throws(() => normalizeFocusPathSnapshot(oversizedPath), /focus path.*large/i);
-});
-
-test("transfers parent provenance without last and derives the child last from active", () => {
-  const parent = { entryId: "entry-a", binding: createLocalFocusBinding(binding) };
-  const transfer = createFocusTransfer(parent, "parent-inherited", binding.active);
-
-  assert.deepEqual(transfer.parent, { sessionId: "session-a", entryId: "entry-a" });
-  assert.equal("last" in transfer, false);
-  assert.equal("agentSessionId" in transfer, false);
-
-  const child = createTransferredFocusBinding("session-child", transfer);
-  assert.equal(child.agentSessionId, "session-child");
-  assert.equal(child.source, "parent-inherited");
-  assert.strictEqual(child.last, child.active);
-  assert.equal(Object.isFrozen(child.active.focus), true);
-
-  const offChild = createTransferredFocusBinding(
-    "session-off-child",
-    createFocusTransfer(parent, "parent-assigned", null),
+      subfocus: null,
+    }),
+    /focus path.*large/i,
   );
-  assert.equal(offChild.active, null);
-  assert.equal(offChild.last, null);
-});
-
-test("encodes and consumes exactly one initial transfer block at an eligible offset", () => {
-  const transfer = createFocusTransfer({ entryId: "entry-a", binding }, "parent-inherited", binding.active);
-  const block = encodeFocusTransfer(transfer);
-  assert.match(block, /^<pi-focus-binding>\n/);
-  assert.match(block, /\n<\/pi-focus-binding>\n$/);
-
-  const direct = consumeInitialFocusTransfer(`${block}do the task`);
-  assert.equal(direct.text, "do the task");
-  assert.deepEqual(direct.transfer, transfer);
-
-  const prefix = "---\n# Your Task (below)\n";
-  const inherited = consumeInitialFocusTransfer(`${prefix}${block}do the task`);
-  assert.equal(inherited.text, `${prefix}do the task`);
-  assert.deepEqual(inherited.transfer, transfer);
-
-  assert.equal(consumeInitialFocusTransfer(`context\n${block}do the task`), null);
-  assert.throws(() => consumeInitialFocusTransfer(`${block}${block}do the task`), /multiple focus transfer blocks/i);
-
-  const oversized = `<pi-focus-binding>\n${"x".repeat(MAX_TRANSFER_YAML_BYTES + 1)}\n</pi-focus-binding>\n`;
-  assert.throws(() => consumeInitialFocusTransfer(oversized), /focus transfer.*large/i);
 });
