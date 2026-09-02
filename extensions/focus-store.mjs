@@ -134,6 +134,7 @@ function loadCatalogUnlocked(cwd, root) {
 function migrateLegacyCatalog(cwd, root, legacyPath) {
   const token = lockToken();
   const legacyLock = acquireLegacyStateLock(root, token);
+  let markerWritten = false;
   let complete = false;
 
   try {
@@ -158,10 +159,11 @@ function migrateLegacyCatalog(cwd, root, legacyPath) {
       version: 1,
       source_sha256: sourceHash,
     }));
+    markerWritten = true;
     atomicWrite(legacyLock.path, stringify({ migrated: true }));
     complete = true;
   } finally {
-    if (!complete) releaseLegacyStateLock(legacyLock);
+    if (!complete && !markerWritten) releaseLegacyStateLock(legacyLock);
   }
 }
 

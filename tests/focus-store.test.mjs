@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -258,6 +259,37 @@ test("releases a failed migration lock and leaves a permanent YAML state sentine
   assert.deepEqual(parse(readFileSync(join(root, ".state.lock"), "utf8")), { migrated: true });
   writeFileSync(join(root, "state.json"), "not json");
   assert.equal(loadFocusCatalog(migrated).foci[0].id, "focus-a");
+});
+
+test("retains the legacy lock if its YAML sentinel write fails after marker creation", (t) => {
+  const cwd = project();
+  t.after(() => cleanup(cwd));
+  const root = focusRoot(cwd);
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "state.json"), legacyState());
+  const sentinel = join(root, ".state.lock");
+  const originalRename = fs.renameSync;
+  fs.renameSync = (source, destination) => {
+    if (destination === sentinel) {
+      const error = new Error("sentinel write denied");
+      error.code = "EACCES";
+      throw error;
+    }
+    return originalRename(source, destination);
+  };
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.renameSync = originalRename;
+    syncBuiltinESMExports();
+  });
+
+  assert.throws(() => loadFocusCatalog(cwd), /sentinel write denied/);
+  assert.equal(existsSync(join(root, ".catalog-v1.yaml")), true);
+  assert.equal(existsSync(sentinel), true);
+  assert.match(readFileSync(sentinel, "utf8"), /"token"/);
+  assert.throws(() => writeFileSync(sentinel, "v0.1 writer", { flag: "wx" }), { code: "EEXIST" });
+  writeFileSync(join(root, "state.json"), "not json");
+  assert.equal(loadFocusCatalog(cwd).foci[0].id, "focus-a");
 });
 
 test("migrates legacy records without carrying selection and backfills timestamps", (t) => {
