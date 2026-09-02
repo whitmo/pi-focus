@@ -37,6 +37,7 @@ function createHarness(cwd, sessionId, options = {}) {
   const commands = new Map();
   const notices = [];
   const status = new Map();
+  const uiChanges = [];
   let selectCalls = 0;
   let setActiveToolsCalls = 0;
   let throwAfterAppend = false;
@@ -78,8 +79,8 @@ function createHarness(cwd, sessionId, options = {}) {
       async input(title, placeholder) { return options.input?.(title, placeholder); },
       async editor(title, initial) { return options.editor?.(title, initial); },
       notify(message, level) { notices.push({ message, level }); },
-      setStatus(key, value) { status.set(key, value); },
-      setTitle() {},
+      setStatus(key, value) { uiChanges.push({ key, value }); status.set(key, value); },
+      setTitle(value) { uiChanges.push({ key: "title", value }); },
       theme: { fg(_color, text) { return text; } },
     },
     parentPrompt: "Parent is focused on Alpha",
@@ -92,6 +93,7 @@ function createHarness(cwd, sessionId, options = {}) {
     events,
     notices,
     pi,
+    uiChanges,
     sessionManager,
     get selectCalls() { return selectCalls; },
     get setActiveToolsCalls() { return setActiveToolsCalls; },
@@ -185,8 +187,10 @@ test("reload, fresh starts, fork/clone, tree, and shutdown follow the standalone
   assert.equal(treeEntry.parentId, "tree-leaf");
   assert.deepEqual(treeEntry.data, beforeTree);
 
+  const uiChangesBeforeShutdown = child.uiChanges.length;
   await child.events.get("session_shutdown")({}, child.ctx);
   assert.equal(contextText(child), "");
+  assert.equal(child.uiChanges.length, uiChangesBeforeShutdown, "shutdown must not mutate UI state or title");
 
   const nonInteractiveChild = createHarness(cwd, "fresh-child");
   await start(nonInteractiveChild);

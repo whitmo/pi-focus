@@ -167,10 +167,9 @@ export default function focusExtension(pi: ExtensionAPI): void {
     if (current) appendAndReconcile(ctx, current.binding);
   });
 
-  pi.on("session_shutdown", (_event, ctx: CommandContext) => {
+  pi.on("session_shutdown", (_event, _ctx: CommandContext) => {
     current = null;
     sessionCwd = process.cwd();
-    updateFocusStatus(ctx, null, capabilities());
   });
 
   pi.on("resources_discover", () => ({ skillPaths: [SKILL_PARENT] }));
