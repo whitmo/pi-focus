@@ -4,7 +4,7 @@
 
 **Goal:** Replace project-global JSON focus selection with a human-readable shared catalog and one immutable, session-local binding per running agent.
 
-**Architecture:** Focus and subfocus definitions live in per-container Markdown files with YAML frontmatter. The extension keeps the live binding in its instance, records immutable snapshots as Pi custom session entries, and consumes/carries those snapshots through a versioned Agent launch event. Context and tool guards read only the captured binding.
+**Architecture:** Focus and subfocus definitions live in per-container Markdown files with YAML frontmatter. The standalone extension keeps the live binding in its instance and records immutable snapshots as Pi custom session entries. Context and tool guards read only the captured binding; fresh child agents start unbound.
 
 **Tech Stack:** Node.js ESM, TypeScript Pi extension entrypoint, `node:test`, `yaml` 2.9.x, Pi 0.84.3 extension/session APIs.
 
@@ -21,18 +21,15 @@
 - Catalog edits require explicit rebind. Existing agent snapshots never refresh from disk.
 - Focus/subfocus tool declarations compose by intersection; absent is unconstrained and explicit empty denies all.
 - pi-focus never calls `setActiveTools`; declarations remain a guard over already-active registered tools.
-- Snapshot text is capped at 500 characters; display lists at 8×500; `activation.tools` at 128×200; path YAML at 24,000 bytes; transfer YAML at 32,768 bytes; rendered context at 4,000 characters.
-- A valid path is exactly a root focus plus at most one child subfocus whose `parentId` matches.
-- No compaction implementation or lowercase legacy `subagent` adaptation belongs in this plan.
-- Parent-child tests consume `subagents:before-child-start`; the companion Agent-package plan owns emitting that event from every resolved fresh-spawn path.
+- Snapshot text is capped at 500 characters; display lists at 8×500; `activation.tools` at 128×200; path YAML at 24,000 bytes; rendered context at 4,000 characters.
+- A valid ID is 1–200 lowercase ASCII letters, digits, or hyphens, begins with a letter/digit, and matches `^[a-z0-9][a-z0-9-]*$`; a valid path is exactly a root focus plus at most one child subfocus whose `parentId` matches.
+- No compaction implementation, Agent/subagent integration, parent/child propagation, or Clubhouse Agent-definition change belongs in this plan.
+- Every fresh non-interactive process or child starts unbound; no prompt, environment value, or shared event assigns it.
 - Preserve all v0.1 KB containment, symlink rejection, atomic-write, stale-lock, declaration, and guard-only behavior.
 
-## Companion Deliverables
+## Scope Revision
 
-This canonical package plan is independently testable but the umbrella design is complete only with:
-
-- `pi-subagents-focus-interface/docs/superpowers/plans/2026-09-02-focus-child-start-interface.md`: emit `subagents:before-child-start` from every resolved fresh-spawn path and prove Agent-tool, mention, nested, workflow, scheduler, and RPC coverage while resume emits nothing.
-- Clubhouse `.agents/superpowers/plans/2026-09-02-focus-session-integration.md`: vendor the canonical focus implementation, preserve autocomplete, migrate project catalog data, configure every enabled Agent definition to load `focus`, and run the definition matrix.
+Tasks 1–4 were implemented before the user removed parent/child propagation from Layer 2. Task 5 must delete the unapproved transfer/event exports and tests introduced in Task 1 before wiring standalone lifecycle behavior. The abandoned companion Agent plan is not a prerequisite and must not be implemented.
 
 ---
 
@@ -45,7 +42,7 @@ This canonical package plan is independently testable but the umbrella design is
 - Modify: `package-lock.json`
 
 **Interfaces:**
-- Produces: `FOCUS_BINDING_CUSTOM_TYPE`, `SUBAGENT_BEFORE_CHILD_START`, `createLocalFocusBinding(input)`, `createTransferredFocusBinding(sessionId, transfer)`, `createFocusTransfer(parent, source, active)`, `normalizeFocusPathSnapshot(value)`, `restoreFocusBinding(entries)`, `focusBindingIds(binding)`, `encodeFocusTransfer(transfer)`, and `consumeInitialFocusTransfer(text)`; `parent` is `{ entryId: string, binding: FocusBindingV1 }` so transfer provenance is always available.
+- Produces: `FOCUS_BINDING_CUSTOM_TYPE`, `createLocalFocusBinding(input)`, `createForkedFocusBinding(sessionId, sourceEntry)`, `normalizeFocusPathSnapshot(value)`, `restoreFocusBinding(entries)`, and `focusBindingIds(binding)`.
 - Consumes: YAML parser/serializer from `yaml@^2.9.0`.
 
 - [ ] **Step 1: Install the YAML dependency**
@@ -104,9 +101,9 @@ Also assert:
 - explicit `active: null` survives restore;
 - impossible focus/subfocus kind/parent combinations are rejected;
 - a nine-tool declaration remains valid;
-- 201-character IDs, 129 tools, 501-character bounded fields, paths over 24,000 bytes, and raw transfer blocks over 32,768 bytes are rejected;
-- a transfer omits parent `last`, and the child derives `last === active` or both null;
-- `consumeInitialFocusTransfer()` accepts one block at offset zero or immediately after `---\n# Your Task (below)\n`, removes it, and rejects blocks elsewhere/multiple blocks.
+- 201-character IDs, 129 tools, 501-character bounded fields, and paths over 24,000 bytes are rejected;
+- local and fork bindings accept only `source: "local" | "fork"`;
+- fork bindings copy the selected source entry under the new session ID with `forkedFrom: { sessionId, entryId }`.
 
 - [ ] **Step 3: Run the new test and observe the expected failure**
 
@@ -124,23 +121,18 @@ Use these exact constants and public signatures:
 
 ```js
 export const FOCUS_BINDING_CUSTOM_TYPE = "pi-focus:binding";
-export const SUBAGENT_BEFORE_CHILD_START = "subagents:before-child-start";
 export const MAX_ID_LENGTH = 200;
 export const MAX_FIELD_LENGTH = 500;
 export const MAX_LIST_ITEMS = 8;
 export const MAX_TOOL_ITEMS = 128;
 export const MAX_TOOL_NAME_LENGTH = 200;
 export const MAX_PATH_YAML_BYTES = 24_000;
-export const MAX_TRANSFER_YAML_BYTES = 32_768;
 
 export function restoreFocusBinding(entries) {}
 export function focusBindingIds(binding) {}
 export function createLocalFocusBinding(input) {}
-export function createTransferredFocusBinding(sessionId, transfer) {}
-export function createFocusTransfer(parent, source, active) {}
+export function createForkedFocusBinding(sessionId, sourceEntry) {}
 export function normalizeFocusPathSnapshot(value) {}
-export function encodeFocusTransfer(transfer) {}
-export function consumeInitialFocusTransfer(text) {}
 ```
 
 Implementation rules:
@@ -148,10 +140,8 @@ Implementation rules:
 - Validate into new objects; do not retain caller object references.
 - Recursively freeze validated bindings and snapshots.
 - Scan branch entries backward to the first matching `customType`; validate that one only.
-- Measure UTF-8 with `Buffer.byteLength(value, "utf8")` before YAML parsing and again after serialization.
-- `createFocusTransfer(parent, source, active)` takes `{ entryId, binding }`, copies `binding.agentSessionId` plus `entryId` into `parent`, and emits `version`, `capturedAt`, `source`, `active`, and `parent`; transfer data never contains a child `agentSessionId` or parent `last`.
-- Delimit YAML with exact standalone lines `<pi-focus-binding>` and `</pi-focus-binding>`.
-- Return `{ text, transfer }` from a consumed block and `null` when no eligible block exists.
+- Measure normalized path size with `Buffer.byteLength(yaml.stringify(path), "utf8")`.
+- `createForkedFocusBinding(sessionId, sourceEntry)` copies the source binding's active/last snapshots, sets `source: "fork"`, and records only `{ sessionId: sourceEntry.binding.agentSessionId, entryId: sourceEntry.entryId }` in `forkedFrom`.
 
 - [ ] **Step 5: Run the focused tests**
 
@@ -429,12 +419,14 @@ git commit -m "feat: render and guard captured focus paths"
 ### Task 5: Session Lifecycle and Focus Commands
 
 **Files:**
+- Modify: `extensions/focus-session.mjs`
+- Modify: `tests/focus-session.test.mjs`
 - Modify: `extensions/index.ts`
 - Modify: `tests/focus-extension.test.mjs`
 
 **Interfaces:**
-- Consumes: Tasks 1–4 APIs.
-- Produces: one extension-instance-local `{ entryId, binding } | null`; Pi handlers for `session_start`, `session_tree`, `session_shutdown`, `context`, and `tool_call`; existing `/focus` command with autocomplete.
+- Consumes: Tasks 1–4 APIs after removing rejected transfer/event exports.
+- Produces: standalone `pi-focus:binding`, `restoreFocusBinding`, `focusBindingIds`, and one extension-instance-local `{ entryId, binding } | null`; Pi handlers for `session_start`, `session_tree`, `session_shutdown`, `context`, and `tool_call`; existing `/focus` command with autocomplete.
 
 - [ ] **Step 1: Build a Pi-shaped session test harness**
 
@@ -476,7 +468,9 @@ Add exact scenarios:
 - deleting A's active container turns A off while B keeps its snapshot;
 - append success and simulated post-leaf persistence throw both reconcile closure state from `getBranch()`;
 - no handler invokes `setActiveTools`;
-- existing `/focus` argument completions include stored focus IDs.
+- existing `/focus` argument completions include stored focus IDs;
+- a fresh non-interactive child starts with `active: null` even when test fixtures model a focused parent prompt/environment;
+- `focus-session.mjs` exports no Agent event constant, transfer constructor/codec/parser, or parent-inherited/parent-assigned source.
 
 - [ ] **Step 3: Run extension tests and observe shared-state failures**
 
@@ -495,8 +489,6 @@ Inside `focusExtension(pi)`, declare only closure state:
 ```ts
 let current: { entryId: string; binding: FocusBindingV1 } | null = null;
 let sessionCwd = process.cwd();
-let initialInputOpen = false;
-let unsubscribeChildStart: (() => void) | undefined;
 ```
 
 Implement one `appendAndReconcile(ctx, binding)` helper that calls `pi.appendEntry`, catches/report persistence errors, then always assigns `current = restoreFocusBinding(ctx.sessionManager.getBranch())`.
@@ -504,12 +496,13 @@ Implement one `appendAndReconcile(ctx, binding)` helper that calls `pi.appendEnt
 Lifecycle rules:
 
 - every session start: set `sessionCwd = ctx.cwd`;
-- reload: restore only and keep `initialInputOpen = false`;
-- fork (the shared Pi lifecycle reason for `/fork` and `/clone`): restore the selected branch, copy under the new session ID, append, and keep transfer input closed;
-- startup/new: append local off and set `initialInputOpen = true` until the first input, then open chooser only when `ctx.hasUI`;
-- resume: append local off, ask again, and keep transfer input closed;
+- reload: restore only;
+- fork (the shared Pi lifecycle reason for `/fork` and `/clone`): restore the selected branch, create a `source: "fork"` copy under the new session ID, and append;
+- startup/new/resume: append a `source: "local"` off binding, then open the chooser only when `ctx.hasUI`;
 - tree: append the unchanged current binding at the new leaf;
-- shutdown: invoke `unsubscribeChildStart`, clear closure values, and close transfer input.
+- shutdown: clear closure values.
+
+First delete the rejected `SUBAGENT_BEFORE_CHILD_START`, transfer constructors/codecs/parsers, transfer limits, parent source variants, and their tests from `focus-session.mjs`. Keep the approved custom type, local/fork constructors, path validation, restore resolver, and ID helper.
 
 Rewrite every command to load/mutate catalog explicitly and append a new binding only after successful mutation. `/focus on` uses captured `last`; `/focus use` resolves current catalog. Context, status, title, and guard read `current?.binding.active` only.
 
@@ -538,93 +531,13 @@ Expected: zero failures.
 - [ ] **Step 7: Commit Task 5**
 
 ```bash
-git add extensions/index.ts tests/focus-extension.test.mjs
+git add extensions/focus-session.mjs tests/focus-session.test.mjs extensions/index.ts tests/focus-extension.test.mjs
 git commit -m "feat: bind focus to the running session"
 ```
 
 ---
 
-### Task 6: Agent Launch Listener and Initial Transfer
-
-**Prerequisite:** Complete and verify Tasks 1–2 of `.agents/worktrees/pi-subagents-focus-interface/docs/superpowers/plans/2026-09-02-focus-child-start-interface.md` first. Do not claim this task integrated while the installed Agent runner lacks the event.
-
-**Files:**
-- Modify: `extensions/index.ts`
-- Modify: `tests/focus-extension.test.mjs`
-- Modify: `tests/focus-session.test.mjs`
-
-**Interfaces:**
-- Consumes: `SUBAGENT_BEFORE_CHILD_START`, transfer functions, and current runtime binding from Task 1/5.
-- Produces: listener for mutable `SubagentBeforeChildStartV1` payload and one-shot child `input` consumer.
-- External dependency: companion Agent implementation emits the exact event after effective child extensions load and before first input.
-
-- [ ] **Step 1: Add failing parent/child tests**
-
-Simulate `pi.events.emit(SUBAGENT_BEFORE_CHILD_START, request)` and assert:
-
-- no directive copies current active as `parent-inherited`;
-- `@focus focus-b/sub-b` captures the latest catalog revision as `parent-assigned` without changing parent identity;
-- `@focus --off` sends no focus history and does not collide with literal focus ID `off`;
-- bound `scheduler` requests get `blockReason` and no transfer;
-- bound requests whose `loadedExtensionNames` omit `focus` get `blockReason`;
-- mention, nested, workflow, RPC, and agent-tool sources use the same listener;
-- child initial input consumes one block before context injection and appends under the child's session ID;
-- blocks in inherited conversation text or later inputs cannot rebind;
-- an inherit-context delimiter immediately before the transfer is accepted;
-- parent switches after request mutation do not change decoded transfer data;
-- reload, resume, fork, and any input after the first fresh startup/new input cannot consume a transfer;
-- shutdown removes the `subagents:before-child-start` listener so reload cannot accumulate stale parent bindings.
-
-- [ ] **Step 2: Run focused tests and observe missing-handler failures**
-
-Run:
-
-```bash
-node --test tests/focus-session.test.mjs tests/focus-extension.test.mjs
-```
-
-Expected: FAIL because no launch-event or input handlers exist.
-
-- [ ] **Step 3: Implement the shared-launch listener**
-
-Register synchronously:
-
-```ts
-unsubscribeChildStart = pi.events.on(SUBAGENT_BEFORE_CHILD_START, (request) => {
-  // Validate version/source/prompt.
-  // Resolve optional @focus directive or inherit current.
-  // Set request.blockReason on unsupported loaded-extension/scheduler cases.
-  // Otherwise replace request.prompt with encoded immutable transfer + task.
-});
-```
-
-Do not register a compaction handler and do not mutate `Agent` tool arguments directly. The companion Agent event is the single spawn boundary.
-
-- [ ] **Step 4: Implement one-shot child input consumption**
-
-On the first eligible input only, call `consumeInitialFocusTransfer(event.text)`. For a valid transfer, create/append the child binding before returning `{ action: "transform", text }`. For malformed transfer, keep the child off, remove/handle the internal block, and notify an error. Subsequent inputs cannot consume transfer blocks.
-
-- [ ] **Step 5: Run focused and full tests**
-
-Run:
-
-```bash
-node --test tests/focus-session.test.mjs tests/focus-extension.test.mjs
-npm test
-```
-
-Expected: all tests pass.
-
-- [ ] **Step 6: Commit Task 6**
-
-```bash
-git add extensions/index.ts tests/focus-extension.test.mjs tests/focus-session.test.mjs
-git commit -m "feat: propagate focus through agent launches"
-```
-
----
-
-### Task 7: Migration Documentation and Package Verification
+### Task 6: Standalone Documentation and Package Verification
 
 **Files:**
 - Modify: `README.md`
@@ -632,18 +545,18 @@ git commit -m "feat: propagate focus through agent launches"
 - Modify: `.agents/superpowers/specs/2026-09-02-focus-session-identity-design.md` only if implementation required a recorded ruling
 
 **Interfaces:**
-- Consumes: all prior task behavior.
-- Produces: user-facing storage/lifecycle/Agent integration documentation; a package that contains the new modules.
+- Consumes: Tasks 1–5 standalone behavior.
+- Produces: user-facing storage/lifecycle documentation and a package with only the independent binding consumer API.
 
 - [ ] **Step 1: Update README storage and lifecycle documentation**
 
-Document the exact Markdown layout, `.catalog-v1.yaml`, immutable `pi-focus:binding` session entry, startup/resume/reload/fork rules, explicit rebind semantics, guard intersection, `@focus <id>[/<subfocus>]`, `@focus --off`, and the required `subagents:before-child-start` Agent interface.
+Document the exact Markdown layout, `.catalog-v1.yaml`, immutable `pi-focus:binding` session entry, startup/new/resume/reload/fork rules, explicit rebind semantics, and focus/subfocus guard intersection.
 
-State explicitly that Pi owns session JSONL, pi-focus maintains no JSON state, scheduled focus propagation and lowercase legacy `subagent` are unsupported, and retired KB/state data is retained during cross-version migration.
+State explicitly that Pi owns session JSONL, pi-focus maintains no JSON state, fresh child agents start unbound, and parent/child propagation requires an independently designed optional adapter that is not included. Retired KB/state data remains during cross-version migration.
 
 - [ ] **Step 2: Update the focus skill**
 
-Keep command instructions concise. Replace shared “active focus” wording with running-agent binding wording and explain that `/focus use` captures the latest catalog revision while `/focus on` restores the captured prior revision.
+Keep command instructions concise. Replace shared “active focus” wording with running-agent binding wording and explain that `/focus use` captures the latest catalog revision while `/focus on` restores the captured prior revision. Do not mention Agent prompts, transfer directives, environment inheritance, or launch events.
 
 - [ ] **Step 3: Run package and static verification**
 
@@ -653,13 +566,14 @@ Run:
 npm test
 npm pack --dry-run
 ! grep -R 'writeFileSync.*state.json\|activeFocusId.*write\|lastFocusId.*write' extensions
+! grep -R 'SUBAGENT_BEFORE_CHILD_START\|FocusBindingTransfer\|pi-focus-binding' extensions tests README.md skills
 ```
 
 Expected:
 
 - all tests pass;
 - dry-run package includes `extensions/focus-session.mjs`;
-- grep finds no maintained legacy JSON selection write.
+- grep finds no maintained legacy JSON selection write or parent/child propagation implementation.
 
 - [ ] **Step 4: Check the complete diff**
 
@@ -673,9 +587,9 @@ git diff --stat v0.1
 
 Expected: no whitespace errors; only planned source/tests/docs/dependency files changed.
 
-- [ ] **Step 5: Commit Task 7**
+- [ ] **Step 5: Commit Task 6**
 
 ```bash
-git add README.md skills/focus/SKILL.md
-git commit -m "docs: explain session-local focus identity"
+git add README.md skills/focus/SKILL.md .agents/superpowers/specs/2026-09-02-focus-session-identity-design.md docs/superpowers/plans/2026-09-02-focus-session-identity.md
+git commit -m "docs: explain standalone focus identity"
 ```

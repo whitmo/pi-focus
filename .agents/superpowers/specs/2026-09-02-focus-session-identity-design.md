@@ -15,15 +15,15 @@ This change is the lower layer for asynchronous focus-aware compaction. Backgrou
 1. Concurrent Pi processes in one project may use different focus/subfocus selections without affecting one another.
 2. Focus and subfocus definitions persist independently of live membership.
 3. Each running agent has at most one active focus path: one focus and optionally one subfocus.
-4. A parent chooses an `Agent` child's initial binding when that child configuration loads pi-focus: inherit the parent's current snapshot by default or assign another catalog path explicitly. The Clubhouse integration must configure every enabled child type to load pi-focus.
-5. A child owns its copied snapshot after startup. Parent and child changes do not propagate to one another.
-6. Catalog edits do not affect already-running agents. An explicit rebind captures the newer revision.
-7. Hot `/reload` preserves the current running identity's binding.
-8. Startup, `/new`, `/resume`, and process restart do not automatically restore an old selection. Interactive users choose again; non-interactive agents remain off unless a parent supplies a binding.
-9. `/fork` and `/clone` inherit the latest binding on the selected source branch as a copied snapshot; they do not import a later binding from another branch.
-10. Agent exit removes live membership. No durable agent roster is stored in a focus.
-11. Preserve v0.1's guard-only tool policy: declarations restrict already-active tools but never activate, deactivate, or restore tools.
-12. Project-owned catalog and selection storage must not use JSON.
+4. Every fresh process or child agent starts unbound. pi-focus does not infer or receive selection from a parent prompt, environment, Agent tool, or shared launch event.
+5. Catalog edits do not affect already-running agents. An explicit rebind captures the newer revision.
+6. Hot `/reload` preserves the current running identity's binding.
+7. Startup, `/new`, `/resume`, and process restart do not automatically restore an old selection. Interactive users choose again; non-interactive agents remain off.
+8. `/fork` and `/clone` inherit the latest binding on the selected source branch as a copied snapshot; they do not import a later binding from another branch.
+9. Agent exit removes live membership. No durable agent roster is stored in a focus.
+10. Preserve v0.1's guard-only tool policy: declarations restrict already-active tools but never activate, deactivate, or restore tools.
+11. Project-owned catalog and selection storage must not use JSON.
+12. Public pi-focus remains standalone; parent/child focus propagation belongs to an optional future adapter.
 
 ## Ownership Model
 
@@ -95,21 +95,10 @@ type FocusBindingV1 = {
   version: 1;
   agentSessionId: string;
   capturedAt: string;
-  source: "local" | "parent-inherited" | "parent-assigned";
+  source: "local" | "fork";
   active: FocusPathSnapshotV1 | null;
   last: FocusPathSnapshotV1 | null;
-  parent?: {
-    sessionId: string;
-    entryId: string;
-  };
-};
-
-type FocusBindingTransferV1 = {
-  version: 1;
-  capturedAt: string;
-  source: "parent-inherited" | "parent-assigned";
-  active: FocusPathSnapshotV1 | null;
-  parent: {
+  forkedFrom?: {
     sessionId: string;
     entryId: string;
   };
@@ -144,7 +133,7 @@ type ContainerSnapshotV1 = {
 };
 ```
 
-`active: null` records an explicit off state so reload cannot resurrect an older active entry. `last` supports `/focus on` and is itself a captured revision. Restored values are validated, cloned, and recursively frozen before use. Every path requires `focus.kind === "focus"`, `focus.parentId === null`, and, when present, `subfocus.kind === "subfocus"` with `subfocus.parentId === focus.id`. IDs are 1–200 lowercase ASCII letters, digits, or hyphens, beginning with a letter or digit; path depth is exactly one focus plus at most one subfocus. Snapshot names/context strings are capped at 500 characters; `planningDocs`, `refs`, `notes`, `monitors`, `scripts`, and `agents` are capped at 8 items of 500 characters; `activation.tools` is the explicit exception and retains up to 128 tool names of 200 characters so guard semantics are not reduced to the display-list limit. A path snapshot's serialized YAML is capped at 24,000 UTF-8 bytes, and a parent transfer contains only `active`—the child derives `last = active`—so its complete serialized YAML is guaranteed and rechecked to fit the 32,768-byte transfer cap before parsing. Provider focus context retains v0.1's 4,000-character total cap. Catalog documents retain longer prose/list values; snapshot creation applies these deterministic per-field and aggregate caps, rejecting a path that still exceeds 24,000 bytes.
+`active: null` records an explicit off state so reload cannot resurrect an older active entry. `last` supports `/focus on` and is itself a captured revision. Restored values are validated, cloned, and recursively frozen before use. Every path requires `focus.kind === "focus"`, `focus.parentId === null`, and, when present, `subfocus.kind === "subfocus"` with `subfocus.parentId === focus.id`. IDs are 1–200 lowercase ASCII letters, digits, or hyphens, beginning with a letter or digit; path depth is exactly one focus plus at most one subfocus. Snapshot names/context strings are capped at 500 characters; `planningDocs`, `refs`, `notes`, `monitors`, `scripts`, and `agents` are capped at 8 items of 500 characters; `activation.tools` is the explicit exception and retains up to 128 tool names of 200 characters so guard semantics are not reduced to the display-list limit. A path snapshot's serialized YAML is capped at 24,000 UTF-8 bytes. Provider focus context retains v0.1's 4,000-character total cap. Catalog documents retain longer prose/list values; snapshot creation applies these deterministic per-field and aggregate caps, rejecting a path that still exceeds 24,000 bytes.
 
 The snapshot contains resolved context and guard policy. Context injection and tool checks use only the current snapshot, never a fresh catalog read. Therefore another process editing or deleting a catalog entry cannot alter a running agent.
 
@@ -188,45 +177,13 @@ export function focusBindingIds(binding):
 | Delete active container | The deleting agent goes off. Other running agents keep their immutable snapshots. |
 | Exit | Discard in-memory membership. Historical entries remain inert and are ignored on restart/resume. |
 
-If an interactive startup chooser is cancelled, the agent remains off. A non-interactive parent binding may arrive with the first input and replace the initial off entry before the first model request.
+If an interactive startup chooser is cancelled, the agent remains off. Non-interactive fresh processes—including subagents—remain off until that same running agent explicitly chooses a focus through a host that supports the command UI.
 
-## Parent-to-Child Interface
+## Standalone Child Behavior
 
-Agent starts have several callers—`Agent`, `@handle`, nested agents, workflows, scheduling, and cross-extension RPC—so focus propagation belongs at their shared resolved-launch boundary, not only in a `tool_call` handler.
+pi-focus does not import, patch, configure, or listen to an Agent/subagent package. It does not inspect Agent prompts, mutate tool inputs, accept focus bindings from environment variables, or depend on a shared launch event. Loading pi-focus in a fresh child follows ordinary `session_start` behavior: the child appends its own local off binding and remains unbound because it has no interactive chooser.
 
-The companion Agent package emits one synchronous mutable event after it resolves and loads child extensions but before the child's first input:
-
-```ts
-const SUBAGENT_BEFORE_CHILD_START = "subagents:before-child-start";
-
-type SubagentBeforeChildStartV1 = {
-  version: 1;
-  source: "agent-tool" | "mention" | "nested" | "workflow" | "scheduler" | "rpc";
-  agentType: string;
-  prompt: string;
-  loadedExtensionNames: readonly string[];
-  blockReason?: string;
-};
-```
-
-Every fresh-spawn caller routes through this event. Resume does not emit it and therefore cannot overwrite a child's owned binding. pi-focus retains the event unsubscribe callback and invokes it during session shutdown so reload cannot accumulate listeners holding stale parent bindings. After all synchronous listeners return, Agent aborts before the first prompt when `blockReason` is nonempty; otherwise it uses the possibly replaced `prompt`. A package-level test proves every `manager.spawn` path reaches this boundary.
-
-The parent focus extension handles that event:
-
-1. Match `@focus --off` before generic assignment, assign an inactive binding, and remove the directive. A catalog focus whose literal ID is `off` remains addressable.
-2. If the prompt begins with `@focus <focus-id>[/<subfocus-id>]`, resolve that current catalog revision as a parent-assigned snapshot and remove the directive.
-3. Otherwise copy the parent's current immutable binding and mark it `parent-inherited`. If the parent is off, the child starts off.
-4. For a bound child, require `loadedExtensionNames` to contain `focus`; otherwise set `blockReason`. This observes the effective child configuration, including agent-file isolation/allowlists, rather than guessing from raw tool input.
-5. When `source === "scheduler"`, reject a bound transfer. The installed scheduler stores prompts in project JSON, so scheduled focus inheritance is out of scope until that scheduler has a non-JSON transport. An off scheduled child remains allowed without a transfer.
-6. Capture a `FocusBindingTransferV1` and prefix the Agent prompt with a `<pi-focus-binding>` block whose body is YAML. The transfer contains frozen path snapshots and parent entry identity, but not a child session ID the parent cannot know.
-7. The child accepts exactly one transfer and only on the first input of a fresh `startup`/`new` runtime. Reload, resume, and fork begin with transfer input closed. The block must begin at raw offset zero or immediately after Agent's exact `---\n# Your Task (below)\n` inherit-context delimiter; blocks copied inside inherited conversation text or sent on later input are ignored. The `input` handler validates and removes the accepted block before `before_agent_start` and the first provider request.
-8. The child constructs a `FocusBindingV1` using its own session ID while preserving the parent's capture time, source, path snapshots, and provenance. It then clones, freezes, and appends that binding.
-
-The YAML block is spawn input only, not shared state. An immediate foreground/background Agent call—including mention, nested, workflow, and RPC callers—carries the snapshot captured at the shared launch event. Later parent switches cannot change it. The transfer intentionally omits parent `last`: a bound child derives `last` equal to its assigned `active` path, while an inactive child derives both as `null`, so parent focus history does not leak into the child.
-
-The Clubhouse integration configures every enabled bound child type to load pi-focus and tests that effective extension resolution includes `focus`. Explicit isolated children remain usable only when the parent is off. The unrelated legacy lowercase `subagent` tool uses a different implementation and is left unchanged. This Agent package event is a required companion interface, implemented and reviewed separately from pi-focus.
-
-Malformed, oversized, or unknown-version binding input is rejected before it can affect context or tool policy. Snapshot names/context fields and display lists use the limits above; `activation.tools` uses its 128-by-200 guard-policy exception; path YAML is capped at 24,000 bytes; complete transfer YAML is capped at 32,768 bytes before parsing; and rendered provider context remains capped at 4,000 characters. Filesystem paths are never accepted from the parent payload.
+An optional future adapter may define parent/child assignment using pi-focus's public binding helpers, but that adapter must be independently designed, versioned, installed, and approved. It is not part of Layer 2, the Clubhouse roll-off work, or the standalone public package.
 
 ## Catalog Migration
 
@@ -273,17 +230,14 @@ Acceptance coverage must prove:
 3. Hot reload restores; startup and resume ignore historical bindings.
 4. Fork inherits the selected source branch's copy—not a later binding on another branch—and then diverges independently.
 5. Tree navigation retains the current running identity.
-6. Parent default inheritance and explicit focus/subfocus assignment reach the child before its first context build.
-7. Immediate background Agent input uses the captured revision, not a later parent selection; bound scheduled calls are rejected rather than persisted by the Agent scheduler's project JSON.
-8. Catalog edits require explicit rebind; old snapshots continue to render and guard identically.
-9. `restoreFocusBinding` and `focusBindingIds` are pure and reject malformed/unknown versions; a binding with nine declared tools remains valid under the 128-tool guard-policy exception while aggregate transfer limits still hold.
-10. Explicit off entries prevent older selections from resurfacing.
-11. Legacy JSON migrates to Markdown without importing active/last selection.
-12. The catalog contains no maintained JSON state file.
-13. Existing guard-only, KB containment, atomic-write, locking, and declaration-bound tests remain green.
-14. The Clubhouse vendored extension retains its existing command autocomplete behavior.
-15. Every enabled Clubhouse Agent definition either loads `focus` or is explicitly incapable of receiving a bound transfer; effective loaded-extension reporting prevents hidden isolation/restrictive allowlists from silently dropping identity.
-16. Agent-tool, `@handle`, nested, workflow, and RPC fresh starts all traverse `subagents:before-child-start`; resumes do not.
+6. A freshly started non-interactive child is off even when its parent is focused; no prompt/environment/tool event can assign it.
+7. Catalog edits require explicit rebind; old snapshots continue to render and guard identically.
+8. `restoreFocusBinding` and `focusBindingIds` are pure and reject malformed/unknown versions; a binding with nine declared tools remains valid under the 128-tool guard-policy exception while aggregate path limits still hold.
+9. Explicit off entries prevent older selections from resurfacing.
+10. Legacy JSON migrates to Markdown without importing active/last selection.
+11. The catalog contains no maintained JSON state file.
+12. Existing guard-only, KB containment, atomic-write, locking, and declaration-bound tests remain green.
+13. The Clubhouse vendored extension retains its existing command autocomplete behavior.
 
 ## Non-goals
 
@@ -291,7 +245,7 @@ Acceptance coverage must prove:
 - Automatically changing live agents when catalog files change.
 - Activating loadouts, tools, monitors, scripts, or agents.
 - Implementing focus-aware compaction in this layer.
-- Adding a focus field to the public `Agent` tool schema; propagation uses the shared resolved-launch event instead.
-- Adapting the unrelated legacy lowercase `subagent` task/chain protocols.
-- Persisting focus bindings through the installed Agent scheduler until it provides non-JSON transfer storage.
+- Parent/child focus inheritance or assignment.
+- Agent tool, mention, nested-agent, workflow, scheduler, RPC, or environment integration.
+- Configuring Clubhouse Agent definitions to load focus.
 - Restoring a previous focus automatically after process restart or `/resume`.
