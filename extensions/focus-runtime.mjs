@@ -1,6 +1,10 @@
 const MAX_FIELD_LENGTH = 500;
 const MAX_LIST_ITEMS = 8;
 const MAX_CONTEXT_LENGTH = 4_000;
+const MAX_CONTAINER_CONTEXT_LENGTH = 1_500;
+const MAX_PATH_CONTEXT_LENGTH = 650;
+const MAX_ACTIVATION_CONTEXT_LENGTH = 800;
+const MAX_GUARD_CONTEXT_LENGTH = 700;
 
 export function activationCapabilities(registeredToolNames, activeToolNames = registeredToolNames) {
   const registeredTools = names(registeredToolNames);
@@ -40,35 +44,47 @@ export function resolvePathToolPolicy(path, registered, active) {
 }
 
 export function buildFocusContext(path, paths, capabilities) {
-  const declared = effectiveToolDeclaration(path);
-  const registered = capabilities?.registeredTools ?? [];
-  const active = capabilities?.activeTools ?? [];
-  const activeRegistered = declared?.filter((name) => registered.includes(name) && active.includes(name)) ?? [];
-  const inactiveRegistered = declared?.filter((name) => registered.includes(name) && !active.includes(name)) ?? [];
-  const unavailable = declared?.filter((name) => !registered.includes(name)) ?? [];
-  const lines = [
-    "## Current Focus",
-    ...containerContext("Focus", path.focus),
-    ...(path.subfocus ? ["", ...containerContext("Subfocus", path.subfocus)] : []),
-    "",
-    "Focus paths (paths only; knowledge contents are not injected):",
-    ...containerPaths("Focus", paths.focus),
-    ...(path.subfocus && paths.subfocus ? containerPaths("Subfocus", paths.subfocus) : []),
-    "",
-    "Activation declarations (inert):",
-    ...activationLines("Focus", path.focus.activation),
-    ...(path.subfocus ? activationLines("Subfocus", path.subfocus.activation) : []),
-    "",
-    "Effective tool guard:",
-    `- Effective declared tools: ${declared === undefined ? "none" : list(declared)}`,
-    `- Active + registered: ${declared === undefined ? "no focus policy" : list(activeRegistered)}`,
-    `- Registered but inactive (available for explicit activation): ${declared === undefined ? "none" : list(inactiveRegistered)}`,
-    `- Unregistered/unavailable: ${declared === undefined ? "none" : list(unavailable)}`,
-    "- Requires explicit invocation: declarations only guard currently active tools; they do not run loadouts, processes, scripts, or subagents.",
-    `- Optional capability status: loadout_profile ${capabilityText(capabilities?.loadoutProfile)}, process ${capabilityText(capabilities?.process)}, subagent ${capabilityText(capabilities?.subagent)}.`,
-  ].filter(Boolean);
-  const context = lines.join("\n");
-  return context.length > MAX_CONTEXT_LENGTH ? `${context.slice(0, MAX_CONTEXT_LENGTH - 1)}…` : context;
+  const policy = resolvePathToolPolicy(
+    path,
+    capabilities?.registeredTools,
+    capabilities?.activeTools,
+  );
+  const sections = [
+    section("## Current Focus", [
+      ...containerContext("Focus", path.focus),
+      ...(path.subfocus ? containerContext("Subfocus", path.subfocus) : []),
+    ], MAX_CONTAINER_CONTEXT_LENGTH),
+    section("Focus paths (paths only; knowledge contents are not injected):", [
+      ...containerPaths("Focus", paths.focus),
+      ...(path.subfocus && paths.subfocus ? containerPaths("Subfocus", paths.subfocus) : []),
+    ], MAX_PATH_CONTEXT_LENGTH),
+    section("Activation declarations (inert):", [
+      ...activationLines("Focus", path.focus.activation),
+      ...(path.subfocus ? activationLines("Subfocus", path.subfocus.activation) : []),
+    ], MAX_ACTIVATION_CONTEXT_LENGTH),
+    section("Effective tool guard:", [
+      `- Effective declared tools: ${policy === null ? "none" : list(policy.declared)}`,
+      `- Active + registered: ${policy === null ? "no focus policy" : list(policy.allowed)}`,
+      `- Unavailable by host policy: ${policy === null ? "none" : list(policy.unavailable)}`,
+      "- Requires explicit invocation: declarations only guard currently active tools; they do not run loadouts, processes, scripts, or subagents.",
+      `- Optional capability status: loadout_profile ${capabilityText(capabilities?.loadoutProfile)}, process ${capabilityText(capabilities?.process)}, subagent ${capabilityText(capabilities?.subagent)}.`,
+    ], MAX_GUARD_CONTEXT_LENGTH),
+  ];
+  const context = sections.join("\n\n");
+  if (context.length > MAX_CONTEXT_LENGTH) {
+    throw new Error("focus: context budget exceeded");
+  }
+  return context;
+}
+
+function section(heading, lines, budget) {
+  const values = lines.filter(Boolean);
+  const lineLength = Math.floor((budget - values.length + 1) / values.length);
+  return [heading, ...values.map((value) => compactLine(value, lineLength))].join("\n");
+}
+
+function compactLine(value, maxLength) {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 1)}…` : value;
 }
 
 function capability(name, registered, active) {

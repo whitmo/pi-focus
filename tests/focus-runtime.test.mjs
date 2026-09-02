@@ -87,6 +87,27 @@ test("resolvePathToolPolicy preserves registered and active host filtering", asy
   assert.equal(resolvePathToolPolicy({ focus: noPolicy, subfocus: noPolicySub }, ["read"], ["read"]), null);
 });
 
+test("buildFocusContext reports the canonical deduplicated path policy", async () => {
+  const { activationCapabilities, buildFocusContext, resolvePathToolPolicy } = await runtime();
+  const duplicatePath = {
+    focus: tools("read", "read", "missing", "inactive"),
+    subfocus: tools("read", "missing", "inactive", "inactive"),
+  };
+  const capabilities = activationCapabilities(["read", "inactive"], ["read"]);
+  const policy = resolvePathToolPolicy(duplicatePath, capabilities.registeredTools, capabilities.activeTools);
+  const context = buildFocusContext(duplicatePath, { focus: paths.focus, subfocus: paths.subfocus }, capabilities);
+
+  assert.deepEqual(policy, {
+    declared: ["read", "missing", "inactive"],
+    allowed: ["read"],
+    unavailable: ["missing", "inactive"],
+  });
+  assert.match(context, /Effective declared tools: read, missing, inactive/);
+  assert.doesNotMatch(context, /Effective declared tools: read, read/);
+  assert.match(context, /Active \+ registered: read/);
+  assert.match(context, /Unavailable by host policy: missing, inactive/);
+});
+
 test("buildFocusContext renders captured focus and subfocus data without reading the catalog or KB", async () => {
   const { activationCapabilities, buildFocusContext } = await runtime();
   const context = buildFocusContext(
@@ -136,20 +157,36 @@ test("buildFocusContext renders captured focus and subfocus data without reading
   assert.doesNotMatch(source, /focus-store|readKnowledgeEntry|listKnowledgeEntries/);
 });
 
-test("buildFocusContext keeps the hard total bound for a valid large snapshot", async () => {
+test("buildFocusContext preserves every required section for maximum-size focus and subfocus prose", async () => {
   const { activationCapabilities, buildFocusContext } = await runtime();
-  const large = normalizeFocusPathSnapshot({
-    focus: {
-      ...focus,
-      goals: "G".repeat(500),
-      planningDocs: Array.from({ length: 8 }, () => "D".repeat(500)),
-      refs: Array.from({ length: 8 }, () => "R".repeat(500)),
-      notes: Array.from({ length: 8 }, () => "N".repeat(500)),
-    },
-    subfocus: null,
+  const maximumFields = (container, token) => ({
+    ...container,
+    goals: token.repeat(500),
+    scope: token.repeat(500),
+    constraints: token.repeat(500),
+    planningDocs: Array.from({ length: 2 }, () => token.repeat(500)),
+    refs: Array.from({ length: 2 }, () => token.repeat(500)),
+    notes: Array.from({ length: 2 }, () => token.repeat(500)),
   });
-  const context = buildFocusContext(large, { focus: paths.focus, subfocus: null }, activationCapabilities(["read"], ["read"]));
+  const maximumPath = normalizeFocusPathSnapshot({
+    focus: maximumFields(focus, "F"),
+    subfocus: maximumFields(subfocus, "S"),
+  });
+  const context = buildFocusContext(
+    maximumPath,
+    paths,
+    activationCapabilities(["read", "grep", "loadout_profile", "process"], ["read", "grep"]),
+  );
 
+  assert.match(context, /Focus captured revision: 3/);
+  assert.match(context, /Subfocus captured revision: 7/);
+  assert.match(context, new RegExp(paths.focus.kb));
+  assert.match(context, new RegExp(paths.focus.state));
+  assert.match(context, new RegExp(paths.subfocus.kb));
+  assert.match(context, new RegExp(paths.subfocus.state));
+  assert.match(context, /Focus tools: read, grep, loadout_profile, missing/);
+  assert.match(context, /Subfocus tools: grep, write, process/);
+  assert.match(context, /Effective declared tools: grep/);
   assert.ok(context.length <= 4_000);
 });
 
