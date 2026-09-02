@@ -299,6 +299,32 @@ for (const [mismatch, makeStale] of [
   });
 }
 
+test("stale owned commit cancels native fallback after final revalidation", async () => {
+  const fake = await loadCompactExtension();
+  fake.appendUser("pre-boundary user");
+  appendAssistant(fake.sessionManager, "pre-boundary assistant");
+  await fake.commands.get("focus-compact").handler("", fake.ctx);
+  await fake.flushCompactions();
+  fake.auth.resolve({ ok: true, apiKey: "test-key", headers: {} });
+  await tick();
+  fake.runtime.idle = false;
+  fake.completion.resolve(summaryResult("stale committing summary"));
+  await tick();
+
+  fake.runtime.idle = true;
+  fake.handlers.get("agent_settled")({ type: "agent_settled" }, fake.ctx);
+  const captured = fake.sessionManager.getHeader();
+  fake.sessionManager.getHeader = () => ({ ...captured, id: `${captured.id}-other` });
+  await fake.flushCompactions();
+
+  assert.deepEqual(fake.compactCalls.at(-1).result, { cancel: true });
+  assert.equal(
+    fake.sessionManager.getBranch().some((entry) => entry.type === "compaction"),
+    false,
+  );
+  assert.match(fake.notifications.at(-1).message, /stale result discarded/i);
+});
+
 test("a post-boundary focus switch preserves the captured lens and remains on branch", async () => {
   let originalBindingId;
   const fake = await loadCompactExtension({
@@ -501,6 +527,45 @@ for (const [hook, event, resolutionStage] of [
     );
   });
 }
+
+test("session_before_tree cancels pending pre-boundary work", async () => {
+  const fake = await loadCompactExtension();
+  const targetId = fake.appendUser("old context");
+  appendAssistant(fake.sessionManager, "recent context");
+  fake.runtime.idle = false;
+  await fake.commands.get("focus-compact").handler("", fake.ctx);
+
+  await fake.handlers.get("session_before_tree")(
+    treeEvent(targetId, fake.sessionManager.getLeafId()),
+    fake.ctx,
+  );
+  fake.runtime.idle = true;
+  await fake.handlers.get("agent_settled")({ type: "agent_settled" }, fake.ctx);
+  await fake.flushCompactions();
+
+  assert.equal(fake.compactCalls.length, 0);
+  assert.equal(boundaryEntries(fake.sessionManager).length, 0);
+});
+
+test("session_before_tree cancels a requested pre-boundary capture", async () => {
+  const fake = await loadCompactExtension();
+  const targetId = fake.appendUser("old context");
+  appendAssistant(fake.sessionManager, "recent context");
+  fake.commands.get("focus-compact").handler("", fake.ctx);
+
+  await fake.handlers.get("session_before_tree")(
+    treeEvent(targetId, fake.sessionManager.getLeafId()),
+    fake.ctx,
+  );
+  await fake.flushCompactions();
+
+  assert.deepEqual(fake.compactCalls[0].result, { cancel: true });
+  assert.equal(boundaryEntries(fake.sessionManager).length, 0);
+  assert.equal(
+    fake.sessionManager.getBranch().some((entry) => entry.type === "compaction"),
+    false,
+  );
+});
 
 for (const targetKind of ["boundary", "descendant"]) {
   test(`session_before_tree retains work when ${targetKind} is on the boundary branch`, async () => {

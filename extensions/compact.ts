@@ -69,6 +69,7 @@ export default function compactExtension(pi: ExtensionAPI): void {
   let activeContext: ExtensionContext | null = null;
   let pending: PendingRequest = null;
   let captureRequested: PendingRequest = null;
+  let canceledCaptureProbes = 0;
   let job: CompactionJob | null = null;
   let modelKey: string | null = null;
 
@@ -292,11 +293,16 @@ export default function compactExtension(pi: ExtensionAPI): void {
     return { cancel: true };
   };
 
+  const cancelPreBoundaryWork = (): void => {
+    pending = null;
+    if (captureRequested !== null) canceledCaptureProbes += 1;
+    captureRequested = null;
+  };
+
   const cancelOwnedWork = (clearContext: boolean): void => {
     generation += 1;
     job?.controller.abort();
-    pending = null;
-    captureRequested = null;
+    cancelPreBoundaryWork();
     job = null;
     if (clearContext) activeContext = null;
   };
@@ -322,13 +328,15 @@ export default function compactExtension(pi: ExtensionAPI): void {
   pi.on("session_before_tree", (event, ctx) => {
     if (
       job !== null
-      && !boundaryIsOnBranch(
+      && boundaryIsOnBranch(
         ctx.sessionManager.getBranch(event.preparation.targetId),
         job.boundaryId,
       )
     ) {
-      cancelOwnedWork(false);
+      cancelPreBoundaryWork();
+      return;
     }
+    cancelOwnedWork(false);
   });
 
   pi.on("session_shutdown", () => {
@@ -336,6 +344,10 @@ export default function compactExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("session_before_compact", (event, ctx) => {
+    if (canceledCaptureProbes > 0) {
+      canceledCaptureProbes -= 1;
+      return { cancel: true };
+    }
     if (captureRequested !== null) return capture(event, ctx);
     const target = job;
     if (
@@ -346,7 +358,7 @@ export default function compactExtension(pi: ExtensionAPI): void {
     ) return;
     if (!commitIsValid(target)) {
       discardStale(target);
-      return;
+      return { cancel: true };
     }
     return {
       compaction: {
