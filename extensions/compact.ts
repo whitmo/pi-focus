@@ -226,7 +226,7 @@ export default function compactExtension(pi: ExtensionAPI): void {
 
     if (selectedModel == null) {
       notify(ctx, "focus compact: no model available", "warning");
-      return;
+      return { cancel: true };
     }
 
     const id = randomUUID();
@@ -244,7 +244,7 @@ export default function compactExtension(pi: ExtensionAPI): void {
     const boundaryId = ctx.sessionManager.getLeafId();
     if (boundaryId === null || boundaryId === preBoundaryLeafId) {
       notify(ctx, "focus compact: boundary capture failed", "warning");
-      return;
+      return { cancel: true };
     }
 
     const messages = buildSessionContext(branchEntries).messages;
@@ -319,8 +319,16 @@ export default function compactExtension(pi: ExtensionAPI): void {
     cancelOwnedWork(true);
   });
 
-  pi.on("session_before_tree", () => {
-    cancelOwnedWork(false);
+  pi.on("session_before_tree", (event, ctx) => {
+    if (
+      job !== null
+      && !boundaryIsOnBranch(
+        ctx.sessionManager.getBranch(event.preparation.targetId),
+        job.boundaryId,
+      )
+    ) {
+      cancelOwnedWork(false);
+    }
   });
 
   pi.on("session_shutdown", () => {

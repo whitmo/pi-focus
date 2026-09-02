@@ -91,6 +91,20 @@ function summaryResult(text, stopReason = "stop") {
   };
 }
 
+function treeEvent(targetId, oldLeafId) {
+  return {
+    type: "session_before_tree",
+    preparation: {
+      targetId,
+      oldLeafId,
+      commonAncestorId: null,
+      entriesToSummarize: [],
+      userWantsSummary: false,
+    },
+    signal: new AbortController().signal,
+  };
+}
+
 function focusBinding(
   agentSessionId = "agent-a",
   focusId = "focus-a",
@@ -449,7 +463,6 @@ test("session start aborts and clears older extension-instance work", async () =
 for (const [hook, event, resolutionStage] of [
   ["session_before_switch", { type: "session_before_switch", reason: "resume" }, "auth"],
   ["session_before_fork", { type: "session_before_fork", entryId: "entry", position: "at" }, "model"],
-  ["session_before_tree", { type: "session_before_tree" }, "auth"],
   ["session_shutdown", { type: "session_shutdown", reason: "reload" }, "model"],
 ]) {
   test(`${hook} cancels owned work and rejects stale ${resolutionStage} resolution`, async () => {
@@ -488,6 +501,65 @@ for (const [hook, event, resolutionStage] of [
     );
   });
 }
+
+for (const targetKind of ["boundary", "descendant"]) {
+  test(`session_before_tree retains work when ${targetKind} is on the boundary branch`, async () => {
+    const fake = await loadCompactExtension();
+    fake.appendUser("old context");
+    appendAssistant(fake.sessionManager, "recent context");
+    await fake.commands.get("focus-compact").handler("", fake.ctx);
+    await fake.flushCompactions();
+    const boundaryId = boundaryEntries(fake.sessionManager)[0].id;
+    fake.auth.resolve({ ok: true, apiKey: "test-key", headers: {} });
+    await tick();
+    const signal = fake.modelCalls[0].options.signal;
+    const targetId = targetKind === "boundary"
+      ? boundaryId
+      : fake.appendUser("target descendant");
+    appendAssistant(fake.sessionManager, "current descendant");
+
+    await fake.handlers.get("session_before_tree")(
+      treeEvent(targetId, fake.sessionManager.getLeafId()),
+      fake.ctx,
+    );
+    fake.sessionManager.branch(targetId);
+    fake.completion.resolve(summaryResult("retained tree summary"));
+    await tick();
+    await fake.flushCompactions();
+
+    assert.equal(signal.aborted, false);
+    assert.equal(
+      fake.sessionManager.getBranch().some((entry) => entry.type === "compaction"),
+      true,
+    );
+  });
+}
+
+test("session_before_tree aborts work when target branch excludes the boundary", async () => {
+  const fake = await loadCompactExtension();
+  const ancestorId = fake.appendUser("old context");
+  appendAssistant(fake.sessionManager, "recent context");
+  await fake.commands.get("focus-compact").handler("", fake.ctx);
+  await fake.flushCompactions();
+  fake.auth.resolve({ ok: true, apiKey: "test-key", headers: {} });
+  await tick();
+  const signal = fake.modelCalls[0].options.signal;
+
+  await fake.handlers.get("session_before_tree")(
+    treeEvent(ancestorId, fake.sessionManager.getLeafId()),
+    fake.ctx,
+  );
+  fake.sessionManager.branch(ancestorId);
+  fake.completion.resolve(summaryResult("stale tree summary"));
+  await tick();
+  await fake.flushCompactions();
+
+  assert.equal(signal.aborted, true);
+  assert.equal(
+    fake.sessionManager.getBranch().some((entry) => entry.type === "compaction"),
+    false,
+  );
+});
 
 test("focus-compact-model reports, validates, persists, and disables a session override", async () => {
   const override = {
@@ -705,7 +777,7 @@ test("later generations inherit file operations and promote reads to modificatio
   assert.deepEqual(compactions[1].details.modifiedFiles, ["/later-edited"]);
 });
 
-test("missing model fails without changing logical context", async () => {
+test("missing model cancels the capture probe without default compaction", async () => {
   const fake = await loadCompactExtension({ model: null });
   fake.appendUser("old context");
   appendAssistant(fake.sessionManager, "recent context");
@@ -715,9 +787,32 @@ test("missing model fails without changing logical context", async () => {
   await fake.flushCompactions();
 
   assert.deepEqual(contextTexts(fake.sessionManager), before);
-  assert.equal(fake.compactCalls[0].result, undefined);
+  assert.deepEqual(fake.compactCalls[0].result, { cancel: true });
   assert.equal(boundaryEntries(fake.sessionManager).length, 0);
+  assert.equal(
+    fake.sessionManager.getBranch().some((entry) => entry.type === "compaction"),
+    false,
+  );
   assert.match(fake.notifications.at(-1).message, /no model available/i);
+});
+
+test("failed boundary append cancels the capture probe without default compaction", async () => {
+  const fake = await loadCompactExtension();
+  fake.appendUser("old context");
+  appendAssistant(fake.sessionManager, "recent context");
+  const before = contextTexts(fake.sessionManager);
+  fake.pi.appendEntry = () => {};
+
+  await fake.commands.get("focus-compact").handler("", fake.ctx);
+  await fake.flushCompactions();
+
+  assert.deepEqual(contextTexts(fake.sessionManager), before);
+  assert.deepEqual(fake.compactCalls[0].result, { cancel: true });
+  assert.equal(
+    fake.sessionManager.getBranch().some((entry) => entry.type === "compaction"),
+    false,
+  );
+  assert.match(fake.notifications.at(-1).message, /boundary capture failed/i);
 });
 
 for (const [failure, resolveFailure, warning] of [

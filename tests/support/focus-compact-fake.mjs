@@ -171,21 +171,25 @@ export async function loadCompactExtension(options = {}) {
       compactOptions.onError?.(new Error("Compaction cancelled"));
       return;
     }
-    if (!result?.compaction) return;
 
-    const value = result.compaction;
+    const fromExtension = result?.compaction !== undefined;
+    const value = result?.compaction ?? {
+      summary: "default summary",
+      firstKeptEntryId: preparation.firstKeptEntryId,
+      tokensBefore: preparation.tokensBefore,
+    };
     const id = sessionManager.appendCompaction(
       value.summary,
       value.firstKeptEntryId,
       value.tokensBefore,
       value.details,
-      true,
+      fromExtension,
       value.usage,
     );
     await handlers.get("session_compact")?.({
       type: "session_compact",
       compactionEntry: sessionManager.getEntry(id),
-      fromExtension: true,
+      fromExtension,
       reason: "manual",
       willRetry: false,
     }, ctx);
