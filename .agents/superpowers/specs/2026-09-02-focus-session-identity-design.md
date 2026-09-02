@@ -216,7 +216,6 @@ Legacy `activeFocusId`, `lastFocusId`, and `activeSubfocusId` are never imported
 
 - Catalog write failure leaves the old file and current binding unchanged.
 - After any binding append success or exception, the extension reconciles its closure-local value from `restoreFocusBinding(sessionManager.getBranch())`, keeping runtime context/guard behavior identical to what hot reload and compaction can observe. If Pi advanced the in-memory leaf before a persistence error, that new valid binding remains active for this process and the extension warns that it may not survive a crash; otherwise the prior binding remains. Restart/resume asks again in either case.
-- Parent binding parse/validation failure leaves the child off and reports the invalid assignment; it never falls back to a shared selection.
 - Missing/deleted catalog files do not invalidate an existing snapshot.
 - A stale catalog edit fails on `createdAt`/`revision` mismatch rather than overwrite newer work.
 - Locks, catalog paths, documents, and knowledge entries reject symlinks and traversal.
