@@ -27,6 +27,13 @@
 - Parent-child tests consume `subagents:before-child-start`; the companion Agent-package plan owns emitting that event from every resolved fresh-spawn path.
 - Preserve all v0.1 KB containment, symlink rejection, atomic-write, stale-lock, declaration, and guard-only behavior.
 
+## Companion Deliverables
+
+This canonical package plan is independently testable but the umbrella design is complete only with:
+
+- `pi-subagents-focus-interface/docs/superpowers/plans/2026-09-02-focus-child-start-interface.md`: emit `subagents:before-child-start` from every resolved fresh-spawn path and prove Agent-tool, mention, nested, workflow, scheduler, and RPC coverage while resume emits nothing.
+- Clubhouse `.agents/superpowers/plans/2026-09-02-focus-session-integration.md`: vendor the canonical focus implementation, preserve autocomplete, migrate project catalog data, configure every enabled Agent definition to load `focus`, and run the definition matrix.
+
 ---
 
 ### Task 1: Immutable Session Binding Contract
@@ -38,7 +45,7 @@
 - Modify: `package-lock.json`
 
 **Interfaces:**
-- Produces: `FOCUS_BINDING_CUSTOM_TYPE`, `SUBAGENT_BEFORE_CHILD_START`, `createLocalFocusBinding(input)`, `createTransferredFocusBinding(sessionId, transfer)`, `createFocusTransfer(binding, source, active)`, `normalizeFocusPathSnapshot(value)`, `restoreFocusBinding(entries)`, `focusBindingIds(binding)`, `encodeFocusTransfer(transfer)`, and `consumeInitialFocusTransfer(text)`.
+- Produces: `FOCUS_BINDING_CUSTOM_TYPE`, `SUBAGENT_BEFORE_CHILD_START`, `createLocalFocusBinding(input)`, `createTransferredFocusBinding(sessionId, transfer)`, `createFocusTransfer(parent, source, active)`, `normalizeFocusPathSnapshot(value)`, `restoreFocusBinding(entries)`, `focusBindingIds(binding)`, `encodeFocusTransfer(transfer)`, and `consumeInitialFocusTransfer(text)`; `parent` is `{ entryId: string, binding: FocusBindingV1 }` so transfer provenance is always available.
 - Consumes: YAML parser/serializer from `yaml@^2.9.0`.
 
 - [ ] **Step 1: Install the YAML dependency**
@@ -130,7 +137,7 @@ export function restoreFocusBinding(entries) {}
 export function focusBindingIds(binding) {}
 export function createLocalFocusBinding(input) {}
 export function createTransferredFocusBinding(sessionId, transfer) {}
-export function createFocusTransfer(binding, source, active) {}
+export function createFocusTransfer(parent, source, active) {}
 export function normalizeFocusPathSnapshot(value) {}
 export function encodeFocusTransfer(transfer) {}
 export function consumeInitialFocusTransfer(text) {}
@@ -142,7 +149,7 @@ Implementation rules:
 - Recursively freeze validated bindings and snapshots.
 - Scan branch entries backward to the first matching `customType`; validate that one only.
 - Measure UTF-8 with `Buffer.byteLength(value, "utf8")` before YAML parsing and again after serialization.
-- The transfer payload contains `version`, `capturedAt`, `source`, `active`, and `parent`; it never contains `agentSessionId` or `last`.
+- `createFocusTransfer(parent, source, active)` takes `{ entryId, binding }`, copies `binding.agentSessionId` plus `entryId` into `parent`, and emits `version`, `capturedAt`, `source`, `active`, and `parent`; transfer data never contains a child `agentSessionId` or parent `last`.
 - Delimit YAML with exact standalone lines `<pi-focus-binding>` and `</pi-focus-binding>`.
 - Return `{ text, transfer }` from a consumed block and `null` when no eligible block exists.
 
@@ -173,7 +180,7 @@ git commit -m "feat: add immutable focus binding contract"
 
 **Interfaces:**
 - Consumes: `normalizeFocusPathSnapshot(value)` from Task 1.
-- Produces: `createEmptyCatalog()`, `normalizeFocusCatalog(value)`, `normalizeLegacyFocusState(value)`, `createFocus(catalog, input, now)`, `updateFocus(catalog, id, expected, input, now)`, `retireFocus(catalog, id, expected)`, `addFocusNote(catalog, id, expected, note, now)`, `createSubfocus(catalog, focusId, expected, input, now)`, `findMatchingFoci(foci, query)`, `findFocusPath(catalog, focusId, subfocusId)`, and `summarizeFocusPath(path)`.
+- Produces: `createEmptyCatalog()`, `normalizeFocusCatalog(value)`, `normalizeLegacyFocusState(value)`, `createFocus(catalog, input, now)`, `updateFocus(catalog, id, expected, input, now)`, `retireFocus(catalog, id, expected)`, `addFocusNote(catalog, id, expected, note, now)`, `createSubfocus(catalog, focusId, input, now)`, `updateSubfocus(catalog, focusId, subfocusId, expected, input, now)`, `addSubfocusNote(catalog, focusId, subfocusId, expected, note, now)`, `findMatchingFoci(foci, query)`, `findFocusPath(catalog, focusId, subfocusId)`, and `summarizeFocusPath(path)`.
 
 - [ ] **Step 1: Replace selection-state tests with catalog tests**
 
@@ -200,7 +207,7 @@ assert.throws(
 );
 ```
 
-Add subfocus assertions proving it has its own revision and activation policy, parent ID, and snapshot path. Add ID truncation/suffix tests that never exceed 200 characters. Keep legacy normalization accepting null timestamps so migration can backfill them deterministically.
+Add subfocus assertions proving it has its own revision and activation policy, parent ID, update/note transitions, and snapshot path. Creating or editing a subfocus must not increment the parent focus revision because the child document owns its revision. Add ID truncation/suffix tests that never exceed 200 characters. Keep legacy normalization accepting null timestamps so migration can backfill them deterministically.
 
 - [ ] **Step 2: Run the core test and observe selection-shape failures**
 
@@ -223,7 +230,7 @@ Use this catalog shape:
 }
 ```
 
-Every mutation returns `{ catalog, focus }`, `{ catalog, focus, subfocus }`, or `{ catalog }`; it never selects anything. `updateFocus` and `retireFocus` must compare both `createdAt` and `revision`. `createSubfocus` increments the parent focus revision and creates the subfocus at revision 1. Normalize subfocuses with the same context and activation fields as focuses.
+Every mutation returns `{ catalog, focus }`, `{ catalog, focus, subfocus }`, or `{ catalog }`; it never selects anything. `updateFocus` and `retireFocus` must compare both `createdAt` and `revision`. `createSubfocus` creates the subfocus at revision 1 without changing the parent definition revision. `updateSubfocus` and `addSubfocusNote` compare the subfocus's own `createdAt`/`revision` and increment only that revision. Normalize subfocuses with the same context and activation fields as focuses.
 
 Keep `normalizeLegacyFocusState` as a read-only migration parser for v0.1 fields. Do not expose legacy active/last selection to catalog consumers.
 
@@ -462,7 +469,7 @@ Add exact scenarios:
 - switching instance A never alters instance B;
 - `session_start: reload` restores latest branch binding;
 - startup/new/resume append off and never import historical active/last;
-- fork copies the selected source branch entry into the new session ID;
+- `/fork` and `/clone` both arrive as `session_start` reason `fork`; that event copies only the selected source branch entry into the new session ID;
 - tree navigation appends the current snapshot at the new leaf;
 - shutdown clears only closure memory;
 - catalog edit by A rebinds A to revision 2 while B remains revision 1;
@@ -487,18 +494,22 @@ Inside `focusExtension(pi)`, declare only closure state:
 
 ```ts
 let current: { entryId: string; binding: FocusBindingV1 } | null = null;
-let initialInputOpen = true;
+let sessionCwd = process.cwd();
+let initialInputOpen = false;
+let unsubscribeChildStart: (() => void) | undefined;
 ```
 
 Implement one `appendAndReconcile(ctx, binding)` helper that calls `pi.appendEntry`, catches/report persistence errors, then always assigns `current = restoreFocusBinding(ctx.sessionManager.getBranch())`.
 
 Lifecycle rules:
 
-- reload: restore only;
-- fork: restore selected branch, copy under new session ID, append;
-- startup/new/resume: append local off, then open chooser only when `ctx.hasUI`;
+- every session start: set `sessionCwd = ctx.cwd`;
+- reload: restore only and keep `initialInputOpen = false`;
+- fork (the shared Pi lifecycle reason for `/fork` and `/clone`): restore the selected branch, copy under the new session ID, append, and keep transfer input closed;
+- startup/new: append local off and set `initialInputOpen = true` until the first input, then open chooser only when `ctx.hasUI`;
+- resume: append local off, ask again, and keep transfer input closed;
 - tree: append the unchanged current binding at the new leaf;
-- shutdown: clear closure values.
+- shutdown: invoke `unsubscribeChildStart`, clear closure values, and close transfer input.
 
 Rewrite every command to load/mutate catalog explicitly and append a new binding only after successful mutation. `/focus on` uses captured `last`; `/focus use` resolves current catalog. Context, status, title, and guard read `current?.binding.active` only.
 
@@ -535,6 +546,8 @@ git commit -m "feat: bind focus to the running session"
 
 ### Task 6: Agent Launch Listener and Initial Transfer
 
+**Prerequisite:** Complete and verify Tasks 1–2 of `.agents/worktrees/pi-subagents-focus-interface/docs/superpowers/plans/2026-09-02-focus-child-start-interface.md` first. Do not claim this task integrated while the installed Agent runner lacks the event.
+
 **Files:**
 - Modify: `extensions/index.ts`
 - Modify: `tests/focus-extension.test.mjs`
@@ -558,7 +571,9 @@ Simulate `pi.events.emit(SUBAGENT_BEFORE_CHILD_START, request)` and assert:
 - child initial input consumes one block before context injection and appends under the child's session ID;
 - blocks in inherited conversation text or later inputs cannot rebind;
 - an inherit-context delimiter immediately before the transfer is accepted;
-- parent switches after request mutation do not change decoded transfer data.
+- parent switches after request mutation do not change decoded transfer data;
+- reload, resume, fork, and any input after the first fresh startup/new input cannot consume a transfer;
+- shutdown removes the `subagents:before-child-start` listener so reload cannot accumulate stale parent bindings.
 
 - [ ] **Step 2: Run focused tests and observe missing-handler failures**
 
@@ -575,7 +590,7 @@ Expected: FAIL because no launch-event or input handlers exist.
 Register synchronously:
 
 ```ts
-pi.events.on(SUBAGENT_BEFORE_CHILD_START, (request) => {
+unsubscribeChildStart = pi.events.on(SUBAGENT_BEFORE_CHILD_START, (request) => {
   // Validate version/source/prompt.
   // Resolve optional @focus directive or inherit current.
   // Set request.blockReason on unsupported loaded-extension/scheduler cases.

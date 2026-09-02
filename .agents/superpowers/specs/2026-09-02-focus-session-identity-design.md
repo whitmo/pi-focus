@@ -209,7 +209,7 @@ type SubagentBeforeChildStartV1 = {
 };
 ```
 
-Every fresh-spawn caller routes through this event. Resume does not emit it and therefore cannot overwrite a child's owned binding. After all synchronous listeners return, Agent aborts before the first prompt when `blockReason` is nonempty; otherwise it uses the possibly replaced `prompt`. A package-level test proves every `manager.spawn` path reaches this boundary.
+Every fresh-spawn caller routes through this event. Resume does not emit it and therefore cannot overwrite a child's owned binding. pi-focus retains the event unsubscribe callback and invokes it during session shutdown so reload cannot accumulate listeners holding stale parent bindings. After all synchronous listeners return, Agent aborts before the first prompt when `blockReason` is nonempty; otherwise it uses the possibly replaced `prompt`. A package-level test proves every `manager.spawn` path reaches this boundary.
 
 The parent focus extension handles that event:
 
@@ -219,7 +219,7 @@ The parent focus extension handles that event:
 4. For a bound child, require `loadedExtensionNames` to contain `focus`; otherwise set `blockReason`. This observes the effective child configuration, including agent-file isolation/allowlists, rather than guessing from raw tool input.
 5. When `source === "scheduler"`, reject a bound transfer. The installed scheduler stores prompts in project JSON, so scheduled focus inheritance is out of scope until that scheduler has a non-JSON transport. An off scheduled child remains allowed without a transfer.
 6. Capture a `FocusBindingTransferV1` and prefix the Agent prompt with a `<pi-focus-binding>` block whose body is YAML. The transfer contains frozen path snapshots and parent entry identity, but not a child session ID the parent cannot know.
-7. The child accepts exactly one transfer and only on its initial input. The block must begin at raw offset zero or immediately after Agent's exact `---\n# Your Task (below)\n` inherit-context delimiter; blocks copied inside inherited conversation text or sent on later input are ignored. The `input` handler validates and removes the accepted block before `before_agent_start` and the first provider request.
+7. The child accepts exactly one transfer and only on the first input of a fresh `startup`/`new` runtime. Reload, resume, and fork begin with transfer input closed. The block must begin at raw offset zero or immediately after Agent's exact `---\n# Your Task (below)\n` inherit-context delimiter; blocks copied inside inherited conversation text or sent on later input are ignored. The `input` handler validates and removes the accepted block before `before_agent_start` and the first provider request.
 8. The child constructs a `FocusBindingV1` using its own session ID while preserving the parent's capture time, source, path snapshots, and provenance. It then clones, freezes, and appends that binding.
 
 The YAML block is spawn input only, not shared state. An immediate foreground/background Agent call—including mention, nested, workflow, and RPC callers—carries the snapshot captured at the shared launch event. Later parent switches cannot change it. The transfer intentionally omits parent `last`: a bound child derives `last` equal to its assigned `active` path, while an inactive child derives both as `null`, so parent focus history does not leak into the child.
