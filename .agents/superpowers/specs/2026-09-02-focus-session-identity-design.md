@@ -1,7 +1,7 @@
 # Focus Session Identity Design
 
-**Status:** Approved  
-**Date:** 2026-09-02  
+**Status:** Approved
+**Date:** 2026-09-02
 **Base:** `pi-focus` v0.1 (`9ed6ee4`)
 
 ## Purpose

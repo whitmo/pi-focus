@@ -58,10 +58,10 @@ const paths = {
     state: "/project/.agents/focus/foci/strict-focus/state",
   },
   subfocus: {
-    container: "/project/.agents/focus/foci/strict-focus/subfoci/runtime-slice",
-    kb: "/project/.agents/focus/foci/strict-focus/subfoci/runtime-slice/kb",
-    state: "/project/.agents/focus/foci/strict-focus/subfoci/runtime-slice/state",
-  },
+    container: "/project/.agents/focus/foci/strict-focus/subfocuses/runtime-slice",
+    kb: "/project/.agents/focus/foci/strict-focus/subfocuses/runtime-slice/kb",
+    state: "/project/.agents/focus/foci/strict-focus/subfocuses/runtime-slice/state",
+  }
 };
 
 const noPolicy = { activation: undefined };
@@ -190,7 +190,7 @@ test("buildFocusContext preserves full long paths and declarations when the tota
     },
   });
   const focusContainer = `/work/project/.agents/focus/foci/${focusId}`;
-  const subfocusContainer = `${focusContainer}/subfoci/${subfocusId}`;
+  const subfocusContainer = `${focusContainer}/subfocuses/${subfocusId}`;
   const longPaths = {
     focus: {
       container: focusContainer,
@@ -233,7 +233,7 @@ test("buildFocusContext preserves full long paths and declarations when the tota
   });
   const absoluteRoot = `/${Array.from({ length: 40 }, (_, index) => `workspace-${index}`).join("/")}`;
   const oversizedFocusContainer = `${absoluteRoot}/.agents/focus/foci/${focusId}`;
-  const oversizedSubfocusContainer = `${oversizedFocusContainer}/subfoci/${subfocusId}`;
+  const oversizedSubfocusContainer = `${oversizedFocusContainer}/subfocuses/${subfocusId}`;
   const oversizedPaths = {
     focus: {
       container: oversizedFocusContainer,

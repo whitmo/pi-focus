@@ -131,10 +131,10 @@ test("creates and updates revisioned focus records without selection state", () 
   );
 });
 
-test("normalizes bounded inert activation declarations across focus mutations", () => {
-  const monitors = Array.from({ length: 10 }, (_, index) => `monitor-${index}`);
-  const scripts = Array.from({ length: 10 }, (_, index) => `script-${index}`);
-  const agents = Array.from({ length: 10 }, (_, index) => `agent-${index}`);
+test("validates bounded inert activation declarations across focus mutations", () => {
+  const monitors = Array.from({ length: 8 }, (_, index) => `monitor-${index}`);
+  const scripts = Array.from({ length: 8 }, (_, index) => `script-${index}`);
+  const agents = Array.from({ length: 8 }, (_, index) => `agent-${index}`);
   const created = createFocus(createEmptyCatalog(), {
     name: "Foo",
     activation: {
@@ -170,6 +170,27 @@ test("normalizes bounded inert activation declarations across focus mutations", 
   );
   assert.deepEqual(updated.focus.activation, { tools: ["bash"], ...declarations });
   assert.deepEqual(updated.focus.notes, ["Keep this context"]);
+  assert.deepEqual(
+    createFocus(createEmptyCatalog(), {
+      name: "Nine tools",
+      activation: { tools: Array.from({ length: 9 }, (_, index) => `tool-${index}`) },
+    }, NOW).focus.activation,
+    { tools: Array.from({ length: 9 }, (_, index) => `tool-${index}`) },
+  );
+  assert.throws(
+    () => createFocus(createEmptyCatalog(), {
+      name: "Long tool",
+      activation: { tools: ["x".repeat(201)] },
+    }, NOW),
+    /invalid activation metadata/i,
+  );
+  assert.throws(
+    () => createFocus(createEmptyCatalog(), {
+      name: "Nine monitors",
+      activation: { monitors: Array.from({ length: 9 }, (_, index) => `monitor-${index}`) },
+    }, NOW),
+    /invalid activation metadata/i,
+  );
 
   assert.throws(
     () => updateFocus(
@@ -320,6 +341,25 @@ test("subfocuses own revisions, context, activation, notes, and path snapshots",
     "Subfocus scope: child scope",
     "Subfocus constraints: child constraint",
   ].join("\n"));
+});
+
+test("rejects sparse catalog and activation lists", () => {
+  const sparseFoci = Array(1);
+  const sparsePlanningDocs = ["plan", , "reference"];
+  const sparseTools = ["read", , "grep"];
+
+  assert.throws(
+    () => normalizeFocusCatalog({ foci: sparseFoci }),
+    /invalid catalog schema/i,
+  );
+  assert.throws(
+    () => createFocus(createEmptyCatalog(), { name: "Sparse planning", planningDocs: sparsePlanningDocs }, NOW),
+    /invalid catalog schema/i,
+  );
+  assert.throws(
+    () => createFocus(createEmptyCatalog(), { name: "Sparse tools", activation: { tools: sparseTools } }, NOW),
+    /invalid activation metadata/i,
+  );
 });
 
 test("focus and subfocus IDs reserve suffix space within 200 characters", () => {

@@ -27,7 +27,7 @@ export function focusDirectory(cwd, focusId) {
 export function subfocusDirectory(cwd, focusId, subfocusId) {
   return join(
     focusDirectory(cwd, focusId),
-    "subfoci",
+    "subfocuses",
     validateFocusId(subfocusId),
   );
 }
@@ -39,7 +39,7 @@ export function ensureContainerDirectories(cwd, focusId, subfocusId = null) {
   const container = subfocusId === null
     ? focus
     : ensureDirectory(join(
-      ensureDirectory(join(focus, "subfoci")),
+      ensureDirectory(join(focus, "subfocuses")),
       validateFocusId(subfocusId),
     ));
 
@@ -120,8 +120,9 @@ export function deleteKnowledgeEntry(cwd, focusId, name, subfocusId = null) {
 function loadCatalogUnlocked(cwd, root) {
   const marker = join(root, ".catalog-v1.yaml");
   if (pathExists(marker)) {
-    validateMigrationMarker(marker);
-    return loadCatalogFromDescriptors(root);
+    const catalog = loadCatalogFromDescriptors(root);
+    validateMigrationMarker(marker, catalog);
+    return catalog;
   }
 
   const legacy = join(root, "state.json");
@@ -158,6 +159,8 @@ function migrateLegacyCatalog(cwd, root, legacyPath) {
     atomicWrite(join(root, ".catalog-v1.yaml"), stringify({
       version: 1,
       source_sha256: sourceHash,
+      record_count: descriptorRecordCount(restored),
+      completed_at: new Date().toISOString(),
     }));
     markerWritten = true;
     atomicWrite(legacyLock.path, stringify({ migrated: true }));
@@ -280,6 +283,18 @@ function persistCatalog(root, previous, next) {
   for (const id of after.retiredFocusIds) {
     if (!beforeRetired.has(id)) writeRetirementDescriptor(root, id);
   }
+  refreshMigrationMarker(root, after);
+}
+
+function refreshMigrationMarker(root, catalog) {
+  const path = join(root, ".catalog-v1.yaml");
+  if (!pathExists(path)) return;
+  const marker = parseYamlFile(path, "migration marker");
+  atomicWrite(path, stringify({
+    ...marker,
+    record_count: descriptorRecordCount(catalog),
+    completed_at: new Date().toISOString(),
+  }));
 }
 
 function persistSubfocusDescriptors(root, before, focus) {
@@ -304,7 +319,7 @@ function removeFocusDescriptors(root, focus) {
 }
 
 function removeSubfocusDescriptor(root, focusId, subfocusId) {
-  removeDescriptor(join(root, "foci", focusId, "subfoci", subfocusId, "subfocus.md"));
+  removeDescriptor(join(root, "foci", focusId, "subfocuses", subfocusId, "subfocus.md"));
 }
 
 function removeAllDescriptors(root) {
@@ -400,12 +415,12 @@ function descriptorEntries(root) {
       if (!entry.isDirectory() || !validFocusId(entry.name)) return null;
       const directory = join(foci, entry.name);
       assertDirectory(directory);
-      const subfoci = join(directory, "subfoci");
+      const subfocuses = join(directory, "subfocuses");
       return {
         id: entry.name,
         focus: descriptorFile(join(directory, "focus.md")),
         retired: descriptorFile(join(directory, "retired.yaml")),
-        subfocuses: pathExists(subfoci) ? subfocusDescriptorEntries(subfoci) : [],
+        subfocuses: pathExists(subfocuses) ? subfocusDescriptorEntries(subfocuses) : [],
       };
     })
     .filter(Boolean)
@@ -460,14 +475,18 @@ function parseDocument(document, path) {
 }
 
 function encodeFocus(focus) {
-  return descriptorFields(focus);
+  return {
+    kind: "focus",
+    parent_id: null,
+    ...descriptorFields(focus),
+  };
 }
 
 function encodeSubfocus(subfocus) {
   return {
-    id: subfocus.id,
+    kind: "subfocus",
     parent_id: subfocus.parentId,
-    ...descriptorFields(subfocus, ["id"]),
+    ...descriptorFields(subfocus),
   };
 }
 
@@ -508,6 +527,12 @@ function decodeSubfocus(frontmatter) {
 }
 
 function decodeDescriptor(frontmatter, subfocus) {
+  if (
+    frontmatter.kind !== (subfocus ? "subfocus" : "focus")
+    || (subfocus ? typeof frontmatter.parent_id !== "string" : frontmatter.parent_id !== null)
+  ) {
+    throw new Error("focus: invalid catalog descriptor identity");
+  }
   const record = {
     id: frontmatter.id,
     ...(subfocus ? { parentId: frontmatter.parent_id } : {}),
@@ -556,11 +581,30 @@ function decodeActivation(value) {
   };
 }
 
-function validateMigrationMarker(path) {
+function validateMigrationMarker(path, catalog) {
   const marker = parseYamlFile(path, "migration marker");
   if (!isRecord(marker) || marker.version !== 1) {
     throw new Error("focus: invalid catalog migration marker");
   }
+  if (typeof marker.source_sha256 !== "string" || !/^[a-f0-9]{64}$/.test(marker.source_sha256)) {
+    throw new Error("focus: invalid catalog migration marker source SHA-256");
+  }
+  if (!Number.isInteger(marker.record_count) || marker.record_count !== descriptorRecordCount(catalog)) {
+    throw new Error("focus: invalid catalog migration marker record count");
+  }
+  if (!validIsoTimestamp(marker.completed_at)) {
+    throw new Error("focus: invalid catalog migration marker completion timestamp");
+  }
+}
+
+function descriptorRecordCount(catalog) {
+  return catalog.foci.reduce((count, focus) => count + 1 + focus.subfocuses.length, 0);
+}
+
+function validIsoTimestamp(value) {
+  return typeof value === "string"
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+    && !Number.isNaN(Date.parse(value));
 }
 
 function parseYamlFile(path, label) {
@@ -602,7 +646,7 @@ function existingContainerPaths(cwd, focusId, subfocusId) {
   const container = subfocusId === null
     ? focus
     : subfocusDirectory(cwd, focusId, subfocusId);
-  if (subfocusId !== null) assertDirectory(join(focus, "subfoci"));
+  if (subfocusId !== null) assertDirectory(join(focus, "subfocuses"));
   assertDirectory(container);
   assertWithin(realpathSync(focus), realpathSync(container));
   return { focus, container, kb: join(container, "kb") };

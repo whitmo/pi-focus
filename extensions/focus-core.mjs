@@ -8,7 +8,7 @@ export function createEmptyCatalog() {
 }
 
 export function normalizeFocusCatalog(value) {
-  if (!isRecord(value) || (value.foci !== undefined && !Array.isArray(value.foci))) {
+  if (!isRecord(value) || (value.foci !== undefined && !isDenseArray(value.foci))) {
     throw new Error("focus: invalid catalog schema");
   }
 
@@ -19,7 +19,7 @@ export function normalizeFocusCatalog(value) {
 }
 
 export function normalizeLegacyFocusState(value) {
-  if (!isRecord(value) || (value.foci !== undefined && !Array.isArray(value.foci))) {
+  if (!isRecord(value) || (value.foci !== undefined && !isDenseArray(value.foci))) {
     throw new Error("focus: invalid state schema");
   }
 
@@ -308,7 +308,7 @@ function normalizeFocus(value) {
 
 function normalizeSubfocuses(value, focusId) {
   if (value === undefined) return [];
-  if (!Array.isArray(value)) throw new Error("focus: invalid catalog schema");
+  if (!isDenseArray(value)) throw new Error("focus: invalid catalog schema");
   return value.map((subfocus) => normalizeSubfocus(subfocus, focusId));
 }
 
@@ -361,7 +361,7 @@ function normalizeLegacyFocus(value) {
 
 function normalizeLegacySubfocuses(value) {
   if (value === undefined) return [];
-  if (!Array.isArray(value)) throw new Error("focus: invalid state schema");
+  if (!isDenseArray(value)) throw new Error("focus: invalid state schema");
   return value.map(normalizeLegacySubfocus);
 }
 
@@ -446,13 +446,14 @@ function cleanActivation(value) {
 
   const activation = {};
   if (value.tools !== undefined) {
-    if (!Array.isArray(value.tools) || value.tools.some((tool) => typeof tool !== "string")) {
+    if (!isDenseArray(value.tools) || value.tools.some((tool) => typeof tool !== "string")) {
       throw new Error("focus: invalid activation metadata");
     }
-    activation.tools = value.tools
-      .map((tool) => clean(tool).slice(0, MAX_TOOL_NAME_LENGTH))
-      .filter(Boolean)
-      .slice(0, MAX_TOOL_ITEMS);
+    const tools = value.tools.map(clean).filter(Boolean);
+    if (tools.length > MAX_TOOL_ITEMS || tools.some((tool) => tool.length > MAX_TOOL_NAME_LENGTH)) {
+      throw new Error("focus: invalid activation metadata");
+    }
+    activation.tools = tools;
   }
   if (value.loadoutPreset !== undefined) {
     if (typeof value.loadoutPreset !== "string") {
@@ -463,20 +464,21 @@ function cleanActivation(value) {
   }
   for (const key of ["monitors", "scripts", "agents"]) {
     if (value[key] === undefined) continue;
-    if (!Array.isArray(value[key]) || value[key].some((item) => typeof item !== "string")) {
+    if (!isDenseArray(value[key]) || value[key].some((item) => typeof item !== "string")) {
       throw new Error("focus: invalid activation metadata");
     }
-    activation[key] = value[key]
-      .map(bounded)
-      .filter(Boolean)
-      .slice(0, MAX_ACTIVATION_LIST_ITEMS);
+    const items = value[key].map(bounded).filter(Boolean);
+    if (items.length > MAX_ACTIVATION_LIST_ITEMS) {
+      throw new Error("focus: invalid activation metadata");
+    }
+    activation[key] = items;
   }
   return Object.keys(activation).length ? activation : undefined;
 }
 
 function normalizeFocusIds(value) {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.some((id) => !validId(id))) {
+  if (!isDenseArray(value) || value.some((id) => !validId(id))) {
     throw new Error("focus: invalid catalog schema");
   }
   return [...new Set(value)];
@@ -512,7 +514,7 @@ function clean(value) {
 
 function cleanList(value) {
   if (value === undefined) return [];
-  if (Array.isArray(value)) return value.map(clean).filter(Boolean);
+  if (isDenseArray(value)) return value.map(clean).filter(Boolean);
   if (typeof value === "string") {
     return value.split(/[\n,]/).map(clean).filter(Boolean);
   }
@@ -544,6 +546,10 @@ function validId(value) {
   return typeof value === "string"
     && value.length <= MAX_ID_LENGTH
     && /^[a-z0-9][a-z0-9-]*$/.test(value);
+}
+
+function isDenseArray(value) {
+  return Array.isArray(value) && [...value.keys()].every((index) => index in value);
 }
 
 function isRecord(value) {

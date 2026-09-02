@@ -109,6 +109,46 @@ test("stores a catalog as revisioned Markdown without state JSON", (t) => {
   assert.ok(document.indexOf("created_at:") < document.indexOf("updated_at:"));
 });
 
+test("round-trips required focus and subfocus descriptor identity fields", (t) => {
+  const cwd = project();
+  t.after(() => cleanup(cwd));
+
+  const created = createCatalogFocus(cwd);
+  const transition = updateFocusCatalog(cwd, (catalog) => createSubfocus(
+    catalog,
+    created.focus.id,
+    { name: "Subfocus A" },
+    LATER,
+  ));
+  const focusPath = join(focusDirectory(cwd, created.focus.id), "focus.md");
+  const subfocusPath = join(subfocusDirectory(cwd, created.focus.id, transition.subfocus.id), "subfocus.md");
+  const focusDocument = readFileSync(focusPath, "utf8");
+  const subfocusDocument = readFileSync(subfocusPath, "utf8");
+  const focusFrontmatter = parse(focusDocument.match(/^---\n([\s\S]*?)\n---/)[1]);
+  const subfocusFrontmatter = parse(subfocusDocument.match(/^---\n([\s\S]*?)\n---/)[1]);
+
+  assert.deepEqual(
+    { kind: focusFrontmatter.kind, parentId: focusFrontmatter.parent_id },
+    { kind: "focus", parentId: null },
+  );
+  assert.deepEqual(
+    { kind: subfocusFrontmatter.kind, parentId: subfocusFrontmatter.parent_id },
+    { kind: "subfocus", parentId: created.focus.id },
+  );
+  assert.deepEqual(loadFocusCatalog(cwd), transition.catalog);
+
+  for (const [path, document, from, to] of [
+    [focusPath, focusDocument, "kind: focus\n", "kind: subfocus\n"],
+    [focusPath, focusDocument, "parent_id: null\n", ""],
+    [subfocusPath, subfocusDocument, "kind: subfocus\n", "kind: focus\n"],
+    [subfocusPath, subfocusDocument, `parent_id: ${created.focus.id}\n`, ""],
+  ]) {
+    writeFileSync(path, document.replace(from, to));
+    assert.throws(() => loadFocusCatalog(cwd), /invalid catalog descriptor/i);
+    writeFileSync(path, document);
+  }
+});
+
 test("preserves a Markdown body when an extension updates frontmatter", (t) => {
   const cwd = project();
   t.after(() => cleanup(cwd));
@@ -148,7 +188,7 @@ test("keeps focus and subfocus knowledge entries in their own containers", (t) =
 
   assert.equal(
     subfocusDirectory(cwd, created.focus.id, subfocus.subfocus.id),
-    join(focusDirectory(cwd, created.focus.id), "subfoci", subfocus.subfocus.id),
+    join(focusDirectory(cwd, created.focus.id), "subfocuses", subfocus.subfocus.id),
   );
   assert.equal(readKnowledgeEntry(cwd, created.focus.id, "Plan"), "focus");
   assert.equal(
@@ -290,6 +330,69 @@ test("retains the legacy lock if its YAML sentinel write fails after marker crea
   assert.throws(() => writeFileSync(sentinel, "v0.1 writer", { flag: "wx" }), { code: "EEXIST" });
   writeFileSync(join(root, "state.json"), "not json");
   assert.equal(loadFocusCatalog(cwd).foci[0].id, "focus-a");
+});
+
+test("writes a complete migration marker after descriptor verification", (t) => {
+  const cwd = project();
+  t.after(() => cleanup(cwd));
+  const root = focusRoot(cwd);
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "state.json"), legacyState());
+
+  assert.equal(loadFocusCatalog(cwd).foci[0].subfocuses.length, 1);
+  assert.equal(
+    existsSync(join(root, "foci", "focus-a", "subfocuses", "ignored-subfocus", "subfocus.md")),
+    true,
+  );
+  assert.equal(
+    existsSync(join(root, "foci", "focus-a", "subfoci", "ignored-subfocus", "subfocus.md")),
+    false,
+  );
+  const marker = parse(readFileSync(join(root, ".catalog-v1.yaml"), "utf8"));
+
+  assert.deepEqual(Object.keys(marker).sort(), [
+    "completed_at",
+    "record_count",
+    "source_sha256",
+    "version",
+  ]);
+  assert.equal(marker.version, 1);
+  assert.match(marker.source_sha256, /^[a-f0-9]{64}$/);
+  assert.equal(marker.record_count, 2);
+  assert.equal(new Date(marker.completed_at).toISOString(), marker.completed_at);
+});
+
+test("keeps the migration marker count aligned after catalog updates", (t) => {
+  const cwd = project();
+  t.after(() => cleanup(cwd));
+  const root = focusRoot(cwd);
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "state.json"), legacyState());
+
+  loadFocusCatalog(cwd);
+  updateFocusCatalog(cwd, (catalog) => createFocus(catalog, { name: "Second" }, LATER));
+
+  assert.equal(loadFocusCatalog(cwd).foci.length, 2);
+  assert.equal(parse(readFileSync(join(root, ".catalog-v1.yaml"), "utf8")).record_count, 3);
+});
+
+test("rejects incomplete and mismatched migration markers", (t) => {
+  const cwd = project();
+  t.after(() => cleanup(cwd));
+  const root = focusRoot(cwd);
+  createCatalogFocus(cwd);
+  const marker = join(root, ".catalog-v1.yaml");
+
+  writeFileSync(marker, "version: 1\n");
+  assert.throws(() => loadFocusCatalog(cwd), /migration marker/i);
+  writeFileSync(marker, [
+    "version: 1",
+    `source_sha256: ${"a".repeat(64)}`,
+    "record_count: 2",
+    `completed_at: ${NOW}`,
+    "",
+  ].join("\n"));
+  assert.throws(() => loadFocusCatalog(cwd), /record count/i);
 });
 
 test("migrates legacy records without carrying selection and backfills timestamps", (t) => {
@@ -469,7 +572,13 @@ test("rejects tagged YAML descriptor input", (t) => {
   const root = focusRoot(cwd);
   const paths = ensureContainerDirectories(cwd, "alpha");
   mkdirSync(root, { recursive: true });
-  writeFileSync(join(root, ".catalog-v1.yaml"), "version: 1\n");
+  writeFileSync(join(root, ".catalog-v1.yaml"), [
+    "version: 1",
+    `source_sha256: ${"a".repeat(64)}`,
+    "record_count: 1",
+    `completed_at: ${NOW}`,
+    "",
+  ].join("\n"));
   writeFileSync(join(paths.focus, "focus.md"), [
     "---",
     "id: alpha",
