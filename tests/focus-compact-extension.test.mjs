@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import test from "node:test";
 
 import {
@@ -14,8 +15,29 @@ import { loadCompactExtension } from "./support/focus-compact-fake.mjs";
 const packageJson = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
 );
+const compactSource = await readFile(
+  new URL("../extensions/compact.ts", import.meta.url),
+  "utf8",
+);
+const require = createRequire(import.meta.url);
+const { createJiti } = require("jiti");
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+async function registrationsFor(path) {
+  const events = [];
+  const commands = [];
+  const tools = [];
+  const pi = {
+    on(name) { events.push(name); },
+    registerCommand(name) { commands.push(name); },
+    registerTool(tool) { tools.push(tool.name); },
+  };
+  const jiti = createJiti(import.meta.url, { moduleCache: false });
+  const mod = await jiti.import(path);
+  mod.default(pi);
+  return { commands, events, tools };
+}
 
 function boundaryEntries(sessionManager) {
   return sessionManager.getBranch().filter(
@@ -143,14 +165,45 @@ function focusBinding(
   };
 }
 
-test("exposes the background compaction extension", () => {
+test("package exposes only the independently filterable roots and required peers", () => {
   assert.deepEqual(packageJson.pi.extensions, [
     "./extensions/index.ts",
     "./extensions/compact.ts",
   ]);
+  assert.equal(packageJson.peerDependencies["@earendil-works/pi-coding-agent"], "*");
+  assert.equal(packageJson.peerDependencies.typebox, "*");
 });
 
-test("registers the command, tool, lifecycle hooks, and one compaction hook", async () => {
+test("compact root avoids forbidden compaction and focus-core dependencies", () => {
+  for (const forbidden of [
+    "appendCompaction",
+    "@earendil-works/pi-ai",
+    "pi-vcc",
+    "goosedump",
+    "loadFocusState",
+    "loadFocusCatalog",
+    "focus-core",
+    "focus-store",
+    ".agents/focus",
+    "setActiveTools",
+  ]) {
+    assert.equal(compactSource.includes(forbidden), false, forbidden);
+  }
+});
+
+test("package roots register independently", async () => {
+  const focus = await registrationsFor("../extensions/index.ts");
+  const compact = await registrationsFor("../extensions/compact.ts");
+
+  assert.equal(compact.events.filter((name) => name === "session_before_compact").length, 1);
+  assert.equal(focus.events.includes("session_before_compact"), false);
+  assert.equal(focus.commands.some((name) => name.startsWith("focus-compact")), false);
+  assert.equal(focus.tools.includes("focus_compact"), false);
+  assert.equal(compact.commands.includes("focus"), false);
+  assert.equal(compact.events.includes("tool_call"), false);
+});
+
+test("registers the command, tool, and lifecycle hooks", async () => {
   const fake = await loadCompactExtension();
 
   assert.ok(fake.commands.has("focus-compact"));
@@ -164,7 +217,6 @@ test("registers the command, tool, lifecycle hooks, and one compaction hook", as
   assert.ok(fake.handlers.has("session_shutdown"));
   assert.ok(fake.handlers.has("session_compact"));
   assert.ok(fake.handlers.has("agent_settled"));
-  assert.equal([...fake.handlers.keys()].filter((name) => name === "session_before_compact").length, 1);
 });
 
 test("idle command captures a boundary and returns before the background model", async () => {
