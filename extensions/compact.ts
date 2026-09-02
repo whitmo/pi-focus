@@ -32,7 +32,7 @@ import {
 import { focusBindingIds, restoreFocusBinding } from "./focus-session.mjs";
 
 type Trigger = "automatic" | "command" | "tool";
-type PendingRequest = { trigger: Trigger } | null;
+type PendingRequest = { trigger: Trigger; probeToken: string } | null;
 type JobPhase = "running" | "ready" | "committing";
 type Model = NonNullable<ExtensionContext["model"]>;
 type Completion = Awaited<ReturnType<ExtensionContext["modelRegistry"]["complete"]>>;
@@ -69,7 +69,7 @@ export default function compactExtension(pi: ExtensionAPI): void {
   let activeContext: ExtensionContext | null = null;
   let pending: PendingRequest = null;
   let captureRequested: PendingRequest = null;
-  let canceledCaptureProbes = 0;
+  const captureProbeTokens = new Set<string>();
   let job: CompactionJob | null = null;
   let modelKey: string | null = null;
 
@@ -77,8 +77,11 @@ export default function compactExtension(pi: ExtensionAPI): void {
     requested: Exclude<PendingRequest, null>,
     ctx: ExtensionContext,
   ): void => {
+    captureProbeTokens.add(requested.probeToken);
     ctx.compact({
+      customInstructions: requested.probeToken,
       onError: () => {
+        captureProbeTokens.delete(requested.probeToken);
         if (captureRequested !== requested) return;
         captureRequested = null;
         notify(ctx, "focus compact: not enough history", "warning");
@@ -90,7 +93,10 @@ export default function compactExtension(pi: ExtensionAPI): void {
     if (pending !== null || captureRequested !== null || job !== null) {
       return "coalesced";
     }
-    const requested = { trigger };
+    const requested = {
+      trigger,
+      probeToken: `pi-focus:capture-probe:${randomUUID()}`,
+    };
     if (!ctx.isIdle()) {
       pending = requested;
       return "scheduled";
@@ -295,7 +301,6 @@ export default function compactExtension(pi: ExtensionAPI): void {
 
   const cancelPreBoundaryWork = (): void => {
     pending = null;
-    if (captureRequested !== null) canceledCaptureProbes += 1;
     captureRequested = null;
   };
 
@@ -344,11 +349,14 @@ export default function compactExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("session_before_compact", (event, ctx) => {
-    if (canceledCaptureProbes > 0) {
-      canceledCaptureProbes -= 1;
-      return { cancel: true };
+    const probeToken = event.customInstructions;
+    if (
+      probeToken !== undefined
+      && captureProbeTokens.delete(probeToken)
+    ) {
+      if (captureRequested?.probeToken !== probeToken) return { cancel: true };
+      return capture(event, ctx);
     }
-    if (captureRequested !== null) return capture(event, ctx);
     const target = job;
     if (
       target?.phase !== "committing"

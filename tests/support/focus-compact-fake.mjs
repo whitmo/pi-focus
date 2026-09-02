@@ -144,7 +144,12 @@ export async function loadCompactExtension(options = {}) {
   async function runNativeCompaction(compactOptions) {
     const branchEntries = sessionManager.buildContextEntries();
     const preparation = prepareCompaction(branchEntries, settings);
-    const record = { branchEntries, preparation, result: undefined };
+    const record = {
+      branchEntries,
+      preparation,
+      customInstructions: compactOptions.customInstructions,
+      result: undefined,
+    };
     compactCalls.push(record);
     if (!preparation) {
       compactOptions.onError?.(new Error("Nothing to compact (session too small)"));
@@ -158,6 +163,7 @@ export async function loadCompactExtension(options = {}) {
         type: "session_before_compact",
         preparation,
         branchEntries,
+        customInstructions: compactOptions.customInstructions,
         reason: "manual",
         willRetry: false,
         signal: new AbortController().signal,
@@ -249,6 +255,24 @@ export async function loadCompactExtension(options = {}) {
     compactCalls,
     completion,
     ctx,
+    async emitBeforeCompact(customInstructions) {
+      const branchEntries = sessionManager.buildContextEntries();
+      const preparation = prepareCompaction(branchEntries, settings);
+      const record = { branchEntries, preparation, customInstructions, result: undefined };
+      compactCalls.push(record);
+      if (preparation) {
+        record.result = await handlers.get("session_before_compact")?.({
+          type: "session_before_compact",
+          preparation,
+          branchEntries,
+          customInstructions,
+          reason: "manual",
+          willRetry: false,
+          signal: new AbortController().signal,
+        }, ctx);
+      }
+      return record;
+    },
     handlers,
     modelCalls,
     notifications,

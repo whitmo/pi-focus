@@ -204,6 +204,8 @@ test("ready summary commits at idle and preserves all post-boundary generations"
   await fake.commands.get("focus-compact").handler("", fake.ctx);
   await fake.flushCompactions();
   const boundaryId = boundaryEntries(fake.sessionManager)[0].id;
+  const probeToken = fake.compactCalls[0].customInstructions;
+  assert.match(probeToken, /^pi-focus:capture-probe:/);
 
   fake.auth.resolve({ ok: true, apiKey: "test-key", headers: {} });
   await tick();
@@ -240,6 +242,8 @@ test("ready summary commits at idle and preserves all post-boundary generations"
       "post-boundary assistant two",
     ],
   );
+  assert.equal(JSON.stringify(fake.modelCalls[0].context).includes(probeToken), false);
+  assert.equal(JSON.stringify(fake.sessionManager.getBranch()).includes(probeToken), false);
 });
 
 for (const [mismatch, makeStale] of [
@@ -564,6 +568,46 @@ test("session_before_tree cancels a requested pre-boundary capture", async () =>
   assert.equal(
     fake.sessionManager.getBranch().some((entry) => entry.type === "compaction"),
     false,
+  );
+});
+
+test("unrelated compaction cannot consume a canceled capture probe", async () => {
+  const fake = await loadCompactExtension();
+  const targetId = fake.appendUser("old context");
+  appendAssistant(fake.sessionManager, "recent context");
+  fake.commands.get("focus-compact").handler("", fake.ctx);
+
+  fake.handlers.get("session_before_tree")(
+    treeEvent(targetId, fake.sessionManager.getLeafId()),
+    fake.ctx,
+  );
+  const unrelated = fake.emitBeforeCompact("unrelated compaction");
+  await fake.flushCompactions();
+
+  assert.equal((await unrelated).result, undefined);
+  assert.deepEqual(fake.compactCalls[1].result, { cancel: true });
+  assert.equal(boundaryEntries(fake.sessionManager).length, 0);
+});
+
+test("failed canceled probe cannot poison the next compaction", async () => {
+  const fake = await loadCompactExtension();
+  fake.commands.get("focus-compact").handler("", fake.ctx);
+  await fake.handlers.get("session_before_switch")(
+    { type: "session_before_switch", reason: "new" },
+    fake.ctx,
+  );
+  await fake.flushCompactions();
+  assert.equal(fake.compactCalls[0].preparation, undefined);
+
+  fake.appendUser("old context");
+  appendAssistant(fake.sessionManager, "recent context");
+  fake.ctx.compact();
+  await fake.flushCompactions();
+
+  assert.equal(fake.compactCalls[1].result, undefined);
+  assert.equal(
+    fake.sessionManager.getBranch().some((entry) => entry.type === "compaction"),
+    true,
   );
 });
 
