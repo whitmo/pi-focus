@@ -28,9 +28,19 @@ export function resolveToolPolicy(requested, registered, active) {
   return { declared, allowed, unavailable: declared.filter((name) => !allowed.includes(name)) };
 }
 
-export function buildFocusContext(focus, paths, capabilities) {
-  const activation = focus.activation ?? {};
-  const declared = activation.tools;
+export function effectiveToolDeclaration(path) {
+  const declared = [path.focus.activation?.tools, path.subfocus?.activation?.tools]
+    .filter((value) => value !== undefined);
+  if (!declared.length) return undefined;
+  return declared.reduce((left, right) => left.filter((name) => right.includes(name)));
+}
+
+export function resolvePathToolPolicy(path, registered, active) {
+  return resolveToolPolicy(effectiveToolDeclaration(path), registered, active);
+}
+
+export function buildFocusContext(path, paths, capabilities) {
+  const declared = effectiveToolDeclaration(path);
   const registered = capabilities?.registeredTools ?? [];
   const active = capabilities?.activeTools ?? [];
   const activeRegistered = declared?.filter((name) => registered.includes(name) && active.includes(name)) ?? [];
@@ -38,29 +48,22 @@ export function buildFocusContext(focus, paths, capabilities) {
   const unavailable = declared?.filter((name) => !registered.includes(name)) ?? [];
   const lines = [
     "## Current Focus",
-    `Focus: ${field(focus.name)}`,
-    projectField("goals", focus.goals),
-    projectField("scope", focus.scope),
-    projectField("constraints", focus.constraints),
-    projectList("planning docs", focus.planningDocs),
-    projectList("references", focus.refs),
-    projectList("notes", focus.notes),
+    ...containerContext("Focus", path.focus),
+    ...(path.subfocus ? ["", ...containerContext("Subfocus", path.subfocus)] : []),
     "",
     "Focus paths (paths only; knowledge contents are not injected):",
-    `- Focus: ${paths.focus}`,
-    `- Knowledge base: ${paths.kb}`,
-    `- State index: ${paths.stateIndex}`,
-    `- Focus state directory: ${paths.focusState}`,
+    ...containerPaths("Focus", paths.focus),
+    ...(path.subfocus && paths.subfocus ? containerPaths("Subfocus", paths.subfocus) : []),
     "",
-    "Activation checklist:",
-    `- Declared: ${declared === undefined ? "none" : list(declared)}`,
+    "Activation declarations (inert):",
+    ...activationLines("Focus", path.focus.activation),
+    ...(path.subfocus ? activationLines("Subfocus", path.subfocus.activation) : []),
+    "",
+    "Effective tool guard:",
+    `- Effective declared tools: ${declared === undefined ? "none" : list(declared)}`,
     `- Active + registered: ${declared === undefined ? "no focus policy" : list(activeRegistered)}`,
     `- Registered but inactive (available for explicit activation): ${declared === undefined ? "none" : list(inactiveRegistered)}`,
     `- Unregistered/unavailable: ${declared === undefined ? "none" : list(unavailable)}`,
-    `- Loadout preset intent: ${field(activation.loadoutPreset) || "none"}`,
-    `- Monitor runbooks: ${list(activation.monitors)}`,
-    `- Script runbooks: ${list(activation.scripts)}`,
-    `- Agent runbooks: ${list(activation.agents)}`,
     "- Requires explicit invocation: declarations only guard currently active tools; they do not run loadouts, processes, scripts, or subagents.",
     `- Optional capability status: loadout_profile ${capabilityText(capabilities?.loadoutProfile)}, process ${capabilityText(capabilities?.process)}, subagent ${capabilityText(capabilities?.subagent)}.`,
   ].filter(Boolean);
@@ -76,6 +79,38 @@ function capability(name, registered, active) {
 
 function capabilityText(capability) {
   return capability?.status ?? "unregistered/unavailable; requires explicit invocation";
+}
+
+function containerContext(label, container) {
+  const prefix = label.toLowerCase();
+  return [
+    `${label}: ${field(container.name)}`,
+    `${label} captured revision: ${container.revision}`,
+    projectField(`${prefix} goals`, container.goals),
+    projectField(`${prefix} scope`, container.scope),
+    projectField(`${prefix} constraints`, container.constraints),
+    projectList(`${prefix} planning docs`, container.planningDocs),
+    projectList(`${prefix} references`, container.refs),
+    projectList(`${prefix} notes`, container.notes),
+  ].filter(Boolean);
+}
+
+function containerPaths(label, paths) {
+  return [
+    `- ${label}: ${paths.container}`,
+    `- ${label} knowledge base: ${paths.kb}`,
+    `- ${label} state directory: ${paths.state}`,
+  ];
+}
+
+function activationLines(label, activation = {}) {
+  return [
+    `- ${label} tools: ${activation.tools === undefined ? "none" : list(activation.tools)}`,
+    `- ${label} loadout preset intent: ${field(activation.loadoutPreset) || "none"}`,
+    `- ${label} monitor runbooks: ${list(activation.monitors)}`,
+    `- ${label} script runbooks: ${list(activation.scripts)}`,
+    `- ${label} agent runbooks: ${list(activation.agents)}`,
+  ];
 }
 
 function projectField(label, value) {
