@@ -5,6 +5,11 @@
   "description": "Project-local work focus for Pi",
   "keywords": ["pi-package"],
   "type": "module",
+  "files": [
+    "extensions",
+    "skills",
+    "README.md"
+  ],
   "scripts": {
     "test": "node --test tests/*.test.mjs"
   },

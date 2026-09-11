@@ -1,35 +1,36 @@
+import { fileURLToPath } from "node:url";
+
+type ToolInfo = { name: string };
+
 type ExtensionAPI = {
   on: (event: string, handler: (...args: any[]) => unknown) => void;
   registerCommand: (name: string, command: { description: string; handler: (args: string, ctx: CommandContext) => Promise<void> }) => void;
-  sendUserMessage: (message: string, options?: { deliverAs: "followUp" }) => void;
+  sendUserMessage?: (message: string, options?: { deliverAs: "followUp" }) => void;
+  getActiveTools?: () => string[];
+  getAllTools?: () => ToolInfo[];
 };
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-// @ts-ignore JS helper keeps the extension testable with plain node:test.
-import {
-  addFocusNote,
-  createEmptyState,
-  createFocus,
-  createSubfocus,
-  getActiveFocus,
-  setActiveFocus,
-  setFocusOff,
-  findMatchingFoci,
-  summarizeFocus,
-} from "./focus-core.mjs";
+
+type FocusActivation = {
+  tools?: string[];
+  loadoutPreset?: string;
+  monitors?: string[];
+  scripts?: string[];
+  agents?: string[];
+};
 
 type FocusState = {
   activeFocusId: string | null;
   lastFocusId: string | null;
-  foci: Array<{ id: string; name: string; [key: string]: unknown }>;
+  retiredFocusIds: string[];
+  foci: Array<{ id: string; name: string; activation?: FocusActivation; [key: string]: unknown }>;
   updatedAt: string | null;
 };
 
 type CommandContext = {
   cwd: string;
   hasUI: boolean;
-  isIdle: () => boolean;
+  isIdle?: () => boolean;
+  waitForIdle?: () => Promise<void>;
   ui: {
     input: (title: string, placeholder?: string) => Promise<string | undefined>;
     editor: (title: string, initial?: string) => Promise<string | undefined>;
@@ -41,90 +42,173 @@ type CommandContext = {
   };
 };
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const SKILL_PARENT = join(HERE, "..", "skills");
+// @ts-ignore JS helpers keep the extension testable with plain node:test.
+import {
+  addFocusNote,
+  createFocus,
+  createSubfocus,
+  deleteFocus,
+  findMatchingFoci,
+  getActiveFocus,
+  setActiveFocus,
+  setFocusOff,
+  summarizeFocus,
+  updateFocus,
+} from "./focus-core.mjs";
+// @ts-ignore JS helpers keep the extension testable with plain node:test.
+import {
+  deleteKnowledgeEntry,
+  ensureFocusDirectories,
+  focusDirectory,
+  focusRoot,
+  listKnowledgeEntries,
+  loadFocusState,
+  readKnowledgeEntry,
+  removeFocusDirectory,
+  updateFocusState,
+  writeKnowledgeEntry,
+} from "./focus-store.mjs";
+// @ts-ignore JS helpers keep the extension testable with plain node:test.
+import {
+  activationCapabilities,
+  buildFocusContext,
+  resolveToolPolicy,
+} from "./focus-runtime.mjs";
+
+const SKILL_PARENT = fileURLToPath(new URL("../skills", import.meta.url));
 
 export default function focusExtension(pi: ExtensionAPI) {
+  const registeredTools = (): string[] => pi.getAllTools?.().map((tool) => tool.name) ?? [];
+  const activeTools = (): string[] => pi.getActiveTools?.() ?? [];
+  const capabilities = () => activationCapabilities(registeredTools(), activeTools());
+
+  const activateFocus = async (ctx: CommandContext, transition: (state: FocusState) => FocusState, steer: boolean): Promise<void> => {
+    await ctx.waitForIdle?.();
+    const state = updateFocusState(ctx.cwd, (current: FocusState) => {
+      const next = transition(current);
+      const nextFocus = getActiveFocus(next);
+      if (nextFocus) ensureFocusDirectories(ctx.cwd, nextFocus.id);
+      return next;
+    }) as FocusState;
+    const focus = getActiveFocus(state);
+    try {
+      updateFocusStatus(ctx, state, capabilities());
+    } catch {}
+    if (!focus || !steer) return;
+    try {
+      sendFocusMessage(pi, ctx, `Return to this focus and keep the next answer centered on it:\n\n${summarizeFocus(focus)}`);
+    } catch {}
+  };
+
   pi.on("session_start", (_event, ctx) => {
-    const state = loadState(ctx.cwd);
-    updateFocusStatus(ctx as CommandContext, state);
+    updateFocusStatus(ctx, loadFocusState(ctx.cwd) as FocusState, capabilities());
   });
 
-  pi.on("resources_discover", () => ({
-    skillPaths: [SKILL_PARENT],
-  }));
+  pi.on("resources_discover", () => ({ skillPaths: [SKILL_PARENT] }));
 
-  pi.on("before_agent_start", (event, ctx) => {
-    const state = loadState(ctx.cwd);
+  pi.on("context", (event, ctx) => {
+    const state = loadFocusState(ctx.cwd) as FocusState;
     const focus = getActiveFocus(state);
-    if (!focus) return;
+    if (!focus) return { messages: [...event.messages] };
 
+    const paths = focusPaths(ctx.cwd, focus.id);
+    const text = buildFocusContext(focus, paths, capabilities());
     return {
-      systemPrompt: `${event.systemPrompt}\n\n## Current Focus\n\n${summarizeFocus(focus)}`,
+      messages: [
+        ...event.messages,
+        {
+          role: "custom",
+          customType: "focus-context",
+          content: [{ type: "text", text }],
+          display: false,
+          timestamp: Date.now(),
+        },
+      ],
     };
   });
 
+  pi.on("tool_call", (event, ctx) => {
+    const focus = getActiveFocus(loadFocusState(ctx.cwd) as FocusState);
+    const registered = registeredTools();
+    const active = activeTools();
+    const policy = resolveToolPolicy(focus?.activation?.tools, registered, active);
+    if (!policy || policy.allowed.includes(event.toolName)) return;
+    if (!policy.declared.includes(event.toolName)) {
+      return { block: true, reason: `focus: ${event.toolName} is not declared by the active focus` };
+    }
+    if (!registered.includes(event.toolName)) {
+      return { block: true, reason: `focus: ${event.toolName} is declared but not registered` };
+    }
+    return { block: true, reason: `focus: ${event.toolName} is declared but not active` };
+  });
+
   pi.registerCommand("focus", {
-    description: "Set and steer the current work focus — use new | on | expand | narrow | off | status",
+    description: "Set and steer current work focus — use new | edit | delete | kb | on | expand | narrow | off | status",
     handler: async (args: string, ctx: CommandContext) => {
       const [sub = "", ...rest] = args.trim().split(/\s+/).filter(Boolean);
-
+      const requiresUI = !["off", "status", "use", "on", "help"].includes(sub);
+      if (ctx.hasUI === false && requiresUI) {
+        ctx.ui.notify("focus: interactive focus management is unavailable in this host", "warning");
+        return;
+      }
       if (!sub) {
-        await handleChooser(ctx, pi);
+        await handleChooser(ctx, activateFocus, "", capabilities());
       } else if (sub === "new") {
-        await handleNew(ctx);
+        await handleNew(ctx, activateFocus);
       } else if (sub === "on") {
-        await handleOn(ctx, pi);
+        await handleOn(ctx, activateFocus);
       } else if (sub === "expand") {
         await handleExpand(ctx);
       } else if (sub === "narrow") {
         await handleNarrow(ctx);
       } else if (sub === "off") {
-        await handleOff(ctx);
+        const state = updateFocusState(ctx.cwd, (current: FocusState) => setFocusOff(current)) as FocusState;
+        updateFocusStatus(ctx, state, capabilities());
+        ctx.ui.notify("focus: off", "info");
       } else if (sub === "status") {
-        await handleStatus(ctx);
+        handleStatus(ctx, capabilities());
+      } else if (sub === "edit") {
+        await handleEdit(ctx, capabilities());
+      } else if (sub === "delete") {
+        await handleDelete(ctx, capabilities());
+      } else if (sub === "kb") {
+        await handleKnowledgeBase(ctx);
       } else if (sub === "use") {
-        await handleUse(ctx, rest.join(" "));
+        await handleUse(ctx, rest.join(" "), activateFocus);
       } else if (sub === "help") {
         ctx.ui.notify(focusHelp(), "info");
       } else {
-        await handleChooser(ctx, pi, [sub, ...rest].join(" "));
+        await handleChooser(ctx, activateFocus, [sub, ...rest].join(" "), capabilities());
       }
     },
   });
 }
 
-async function handleChooser(ctx: CommandContext, pi: ExtensionAPI, query = ""): Promise<void> {
-  const state = loadState(ctx.cwd);
+type ActivateFocus = (ctx: CommandContext, transition: (state: FocusState) => FocusState, steer: boolean) => Promise<void>;
+
+async function handleChooser(ctx: CommandContext, activateFocus: ActivateFocus, query = "", capabilities?: ReturnType<typeof activationCapabilities>): Promise<void> {
+  const state = loadFocusState(ctx.cwd) as FocusState;
   const matches = query ? findMatchingFoci(state.foci, query) : [];
   const options = query
     ? [
         ...matches.map((focus) => `${focus.id.toLowerCase() === query.toLowerCase() || focus.name.toLowerCase() === query.toLowerCase() ? "Use exact" : "Use related"} focus “${focus.name}” (${focus.id})`),
         `Create new focus “${query}”`,
       ]
-    : [
-        "View info on current focus",
-        "Switch to a past/existing focus",
-        "Create a new focus",
-      ];
+    : ["View info on current focus", "Switch to a past/existing focus", "Create a new focus"];
   const selected = await ctx.ui.select(query ? `Focus matches for “${query}”` : "Focus", options);
   if (!selected) return;
-
   if (!query) {
-    if (selected === options[0]) return handleStatus(ctx);
-    if (selected === options[1]) return handleSwitch(ctx, pi);
-    return handleNew(ctx);
+    if (selected === options[0]) return handleStatus(ctx, capabilities);
+    if (selected === options[1]) return handleSwitch(ctx, activateFocus);
+    return handleNew(ctx, activateFocus);
   }
-
-  if (selected.startsWith("Create new focus")) {
-    return handleNew(ctx, query);
-  }
+  if (selected.startsWith("Create new focus")) return handleNew(ctx, activateFocus, query);
   const focus = matches[options.indexOf(selected)];
-  if (focus) await activateFocus(ctx, pi, focus);
+  if (focus) await activateFocus(ctx, (state) => setActiveFocus(state, focus.id), true);
 }
 
-async function handleSwitch(ctx: CommandContext, pi: ExtensionAPI): Promise<void> {
-  const state = loadState(ctx.cwd);
+async function handleSwitch(ctx: CommandContext, activateFocus: ActivateFocus): Promise<void> {
+  const state = loadFocusState(ctx.cwd) as FocusState;
   const foci = [...state.foci.filter((focus) => focus.id !== state.activeFocusId), ...state.foci.filter((focus) => focus.id === state.activeFocusId)];
   if (!foci.length) {
     ctx.ui.notify("focus: no existing foci; run /focus new", "warning");
@@ -133,58 +217,36 @@ async function handleSwitch(ctx: CommandContext, pi: ExtensionAPI): Promise<void
   const options = foci.map((focus) => `${focus.name} (${focus.id})`);
   const selected = await ctx.ui.select("Switch focus", options);
   const focus = foci[options.indexOf(selected ?? "")];
-  if (focus) await activateFocus(ctx, pi, focus);
+  if (focus) await activateFocus(ctx, (state) => setActiveFocus(state, focus.id), true);
 }
 
-async function handleNew(ctx: CommandContext, suppliedName?: string): Promise<void> {
+async function handleNew(ctx: CommandContext, activateFocus: ActivateFocus, suppliedName?: string): Promise<void> {
   const name = suppliedName ?? await ctx.ui.input("Focus name", "e.g. Release planning");
   if (!name?.trim()) return;
-
   const goals = await ctx.ui.editor("Goals", "What are we trying to accomplish?");
   const scope = await ctx.ui.editor("Scope", "What is in bounds?");
   const constraints = await ctx.ui.editor("Constraints", "What must stay true?");
   const planningDocs = await ctx.ui.editor("Planning docs", "One path or URL per line");
   const refs = await ctx.ui.editor("Tickets, PRs, repos", "One reference per line");
-
-  const state = createFocus(loadState(ctx.cwd), {
-    name,
-    goals,
-    scope,
-    constraints,
-    planningDocs,
-    refs,
-  }) as FocusState;
-
-  saveState(ctx.cwd, state);
-  updateFocusStatus(ctx, state);
-  ctx.ui.notify(`focus: active → ${getActiveFocus(state)?.name ?? name}`, "info");
+  await activateFocus(ctx, (state) => createFocus(state, { name, goals, scope, constraints, planningDocs, refs }), true);
 }
 
-async function handleOn(ctx: CommandContext, pi: ExtensionAPI): Promise<void> {
-  let state = loadState(ctx.cwd);
-
-  if (!state.activeFocusId && state.lastFocusId) {
-    state = setActiveFocus(state, state.lastFocusId) as FocusState;
-    saveState(ctx.cwd, state);
-  }
-
-  const focus = getActiveFocus(state);
+async function handleOn(ctx: CommandContext, activateFocus: ActivateFocus): Promise<void> {
+  const state = loadFocusState(ctx.cwd) as FocusState;
+  const id = state.activeFocusId ?? state.lastFocusId;
+  const focus = id ? state.foci.find((item) => item.id === id) : null;
   if (!focus) {
     ctx.ui.notify("focus: no active or previous focus; run /focus new", "warning");
     return;
   }
-
-  updateFocusStatus(ctx, state);
-  sendFocusMessage(pi, ctx, `Return to this focus and keep the next answer centered on it:\n\n${summarizeFocus(focus)}`);
+  await activateFocus(ctx, (current) => setActiveFocus(current, focus.id), true);
 }
 
 async function handleExpand(ctx: CommandContext): Promise<void> {
   const note = await ctx.ui.editor("Add focus data", "Paste notes, docs, tickets, PRs, repos, or constraints");
   if (!note?.trim()) return;
-
   try {
-    const state = addFocusNote(loadState(ctx.cwd), note) as FocusState;
-    saveState(ctx.cwd, state);
+    const state = updateFocusState(ctx.cwd, (current: FocusState) => addFocusNote(current, note)) as FocusState;
     updateFocusStatus(ctx, state);
     ctx.ui.notify("focus: added note", "info");
   } catch (error) {
@@ -195,14 +257,11 @@ async function handleExpand(ctx: CommandContext): Promise<void> {
 async function handleNarrow(ctx: CommandContext): Promise<void> {
   const name = await ctx.ui.input("Subfocus name", "e.g. PR review");
   if (!name?.trim()) return;
-
   const goals = await ctx.ui.editor("Subfocus goals", "What is the narrower target?");
   const scope = await ctx.ui.editor("Subfocus scope", "What is in bounds for this slice?");
   const constraints = await ctx.ui.editor("Subfocus constraints", "What should not change?");
-
   try {
-    const state = createSubfocus(loadState(ctx.cwd), { name, goals, scope, constraints }) as FocusState;
-    saveState(ctx.cwd, state);
+    const state = updateFocusState(ctx.cwd, (current: FocusState) => createSubfocus(current, { name, goals, scope, constraints })) as FocusState;
     updateFocusStatus(ctx, state);
     ctx.ui.notify(`focus: narrowed → ${name.trim()}`, "info");
   } catch (error) {
@@ -210,94 +269,35 @@ async function handleNarrow(ctx: CommandContext): Promise<void> {
   }
 }
 
-async function handleOff(ctx: CommandContext): Promise<void> {
-  const state = setFocusOff(loadState(ctx.cwd)) as FocusState;
-  saveState(ctx.cwd, state);
-  updateFocusStatus(ctx, state);
-  ctx.ui.notify("focus: off", "info");
-}
-
-async function handleStatus(ctx: CommandContext): Promise<void> {
-  const state = loadState(ctx.cwd);
-  const focus = getActiveFocus(state);
-  ctx.ui.notify(focus ? summarizeFocus(focus) : "focus: off", "info");
-}
-
-async function activateFocus(ctx: CommandContext, pi: ExtensionAPI, focus: FocusState["foci"][number]): Promise<void> {
-  const next = setActiveFocus(loadState(ctx.cwd), focus.id) as FocusState;
-  saveState(ctx.cwd, next);
-  updateFocusStatus(ctx, next);
-  sendFocusMessage(pi, ctx, `Return to this focus and keep the next answer centered on it:\n\n${summarizeFocus(focus)}`);
-}
-
-async function handleUse(ctx: CommandContext, idOrName: string): Promise<void> {
-  const state = loadState(ctx.cwd);
+async function handleUse(ctx: CommandContext, idOrName: string, activateFocus: ActivateFocus): Promise<void> {
+  const state = loadFocusState(ctx.cwd) as FocusState;
   const query = idOrName.trim().toLowerCase();
   const focus = state.foci.find((item) => item.id === query || item.name.toLowerCase() === query);
   if (!focus) {
     ctx.ui.notify(`focus: unknown focus ${idOrName || "(empty)"}`, "warning");
     return;
   }
-
-  const next = setActiveFocus(state, focus.id) as FocusState;
-  saveState(ctx.cwd, next);
-  updateFocusStatus(ctx, next);
-  ctx.ui.notify(`focus: active → ${focus.name}`, "info");
+  await activateFocus(ctx, (current) => setActiveFocus(current, focus.id), true);
 }
 
-function loadState(cwd: string): FocusState {
-  const path = statePath(cwd);
-  if (!existsSync(path)) {
-    return createEmptyState() as FocusState;
-  }
-
-  try {
-    return JSON.parse(readFileSync(path, "utf8")) as FocusState;
-  } catch {
-    return createEmptyState() as FocusState;
-  }
-}
-
-function saveState(cwd: string, state: FocusState): void {
-  const path = statePath(cwd);
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`, "utf8");
-}
-
-function statePath(cwd: string): string {
-  return join(findRepoRoot(cwd), ".agents", "focus", "state.json");
-}
-
-function findRepoRoot(start: string): string {
-  let current = resolve(start || process.cwd());
-
-  for (;;) {
-    if (existsSync(join(current, ".agents"))) {
-      return current;
-    }
-
-    const parent = dirname(current);
-    if (parent === current) {
-      return resolve(start || process.cwd());
-    }
-    current = parent;
-  }
-}
-
-function updateFocusStatus(ctx: CommandContext, state: FocusState): void {
+function updateFocusStatus(ctx: CommandContext, state: FocusState, capabilities?: ReturnType<typeof activationCapabilities>): void {
   const focus = getActiveFocus(state);
   if (!focus) {
-    ctx.ui.setStatus("focus", undefined);
-    ctx.ui.setTitle?.("pi");
+    try { ctx.ui.setStatus("focus", undefined); } catch {}
+    try { ctx.ui.setStatus("focus-capabilities", undefined); } catch {}
+    try { ctx.ui.setTitle?.("pi"); } catch {}
     return;
   }
-
-  ctx.ui.setStatus("focus", ctx.ui.theme.fg("accent", `focus:${focus.name}`));
-  ctx.ui.setTitle?.(`pi — ${focus.name}`);
+  try { ctx.ui.setStatus("focus", ctx.ui.theme.fg("accent", `focus:${focus.name}`)); } catch {}
+  if (capabilities) {
+    try { ctx.ui.setStatus("focus-capabilities", `focus: loadout_profile ${capabilities.loadoutProfile.status}; process ${capabilities.process.status}; subagent ${capabilities.subagent.status}`); } catch {}
+  }
+  try { ctx.ui.setTitle?.(`pi — ${focus.name}`); } catch {}
 }
 
 function sendFocusMessage(pi: ExtensionAPI, ctx: CommandContext, message: string): void {
-  if (ctx.isIdle()) {
+  if (!pi.sendUserMessage) return;
+  if (ctx.isIdle?.()) {
     pi.sendUserMessage(message);
   } else {
     pi.sendUserMessage(message, { deliverAs: "followUp" });
@@ -305,17 +305,136 @@ function sendFocusMessage(pi: ExtensionAPI, ctx: CommandContext, message: string
   }
 }
 
+async function handleEdit(ctx: CommandContext, capabilities: ReturnType<typeof activationCapabilities>): Promise<void> {
+  const focus = getActiveFocus(loadFocusState(ctx.cwd) as FocusState);
+  if (!focus) {
+    ctx.ui.notify("focus: no active focus to edit", "warning");
+    return;
+  }
+  const fields = ["Goals", "Scope", "Constraints", "Planning docs", "Refs", "Tool declarations", "Loadout preset", "Monitor declarations", "Script declarations", "Agent declarations"];
+  const field = await ctx.ui.select("Edit focus", fields);
+  if (!field) return;
+  const key = field === "Planning docs" ? "planningDocs" : field.toLowerCase();
+  const activationKey = ({
+    "Tool declarations": "tools",
+    "Loadout preset": "loadoutPreset",
+    "Monitor declarations": "monitors",
+    "Script declarations": "scripts",
+    "Agent declarations": "agents",
+  } as Record<string, keyof FocusActivation>)[field];
+  const initial = activationKey === "loadoutPreset"
+    ? focus.activation?.loadoutPreset ?? ""
+    : activationKey
+      ? (focus.activation?.[activationKey] ?? []).join("\n")
+      : String(focus[key] ?? "");
+  const value = await ctx.ui.editor(field, initial);
+  if (value === undefined) return;
+  const input = activationKey
+    ? { activation: { [activationKey]: activationKey === "loadoutPreset" ? value : value.split(/[\n,]/) } }
+    : { [key]: value };
+  const state = updateFocusState(ctx.cwd, (current: FocusState) => updateFocus(current, focus.id, input)) as FocusState;
+  updateFocusStatus(ctx, state, capabilities);
+  ctx.ui.notify(`focus: updated ${field.toLowerCase()}`, "info");
+}
+
+async function handleDelete(ctx: CommandContext, capabilities: ReturnType<typeof activationCapabilities>): Promise<void> {
+  const state = loadFocusState(ctx.cwd) as FocusState;
+  if (!state.foci.length) {
+    ctx.ui.notify("focus: no foci to delete", "warning");
+    return;
+  }
+  const options = state.foci.map((focus) => `${focus.name} (${focus.id})`);
+  const selected = await ctx.ui.select("Delete focus", options);
+  const focus = state.foci[options.indexOf(selected ?? "")];
+  if (!focus) return;
+  const createdAt = focus.createdAt;
+  const confirmed = await ctx.ui.select(`Delete “${focus.name}”?`, ["Cancel", `Delete “${focus.name}”`]);
+  if (confirmed !== `Delete “${focus.name}”`) return;
+  let next: FocusState;
+  try {
+    next = updateFocusState(ctx.cwd, (current: FocusState) => {
+      const selected = current.foci.find((item) => item.id === focus.id);
+      if (!selected || selected.createdAt !== createdAt) throw new Error("focus: delete selection is stale");
+      return deleteFocus(current, focus.id);
+    }) as FocusState;
+  } catch (error) {
+    ctx.ui.notify(`focus: ${(error as Error).message}`, "warning");
+    return;
+  }
+  removeFocusDirectory(ctx.cwd, focus.id);
+  updateFocusStatus(ctx, next, capabilities);
+  ctx.ui.notify(`focus: deleted ${focus.name}`, "info");
+}
+
+async function handleKnowledgeBase(ctx: CommandContext): Promise<void> {
+  const focus = getActiveFocus(loadFocusState(ctx.cwd) as FocusState);
+  if (!focus) {
+    ctx.ui.notify("focus: no active focus knowledge base", "warning");
+    return;
+  }
+  const entries = listKnowledgeEntries(ctx.cwd, focus.id);
+  const selected = await ctx.ui.select("Focus knowledge base", [...entries, "Create new entry"]);
+  if (!selected) return;
+  if (selected === "Create new entry") {
+    const name = await ctx.ui.input("Knowledge entry name", "e.g. plan");
+    if (!name?.trim()) return;
+    const content = await ctx.ui.editor("Knowledge entry", "");
+    if (content === undefined) return;
+    writeKnowledgeEntry(ctx.cwd, focus.id, name, content);
+    ctx.ui.notify("focus: knowledge entry saved", "info");
+    return;
+  }
+  const action = await ctx.ui.select(`Knowledge: ${selected}`, ["Edit entry", "Delete entry"]);
+  if (action === "Edit entry") {
+    const content = await ctx.ui.editor(`Knowledge: ${selected}`, readKnowledgeEntry(ctx.cwd, focus.id, selected));
+    if (content === undefined) return;
+    writeKnowledgeEntry(ctx.cwd, focus.id, selected, content);
+    ctx.ui.notify("focus: knowledge entry saved", "info");
+    return;
+  }
+  if (action === "Delete entry") {
+    const confirmed = await ctx.ui.select(`Delete “${selected}”?`, ["Cancel", `Delete “${selected}”`]);
+    if (confirmed !== `Delete “${selected}”`) return;
+    deleteKnowledgeEntry(ctx.cwd, focus.id, selected);
+    ctx.ui.notify("focus: knowledge entry deleted", "info");
+  }
+}
+
+function handleStatus(ctx: CommandContext, capabilities?: ReturnType<typeof activationCapabilities>): void {
+  const focus = getActiveFocus(loadFocusState(ctx.cwd) as FocusState);
+  if (!focus) {
+    ctx.ui.notify("focus: off", "info");
+    return;
+  }
+  ctx.ui.notify(buildFocusContext(focus, focusPaths(ctx.cwd, focus.id), capabilities), "info");
+}
+
+function focusPaths(cwd: string, focusId: string): { focus: string; kb: string; stateIndex: string; focusState: string } {
+  const focus = focusDirectory(cwd, focusId);
+  return {
+    focus,
+    kb: `${focus}/kb`,
+    stateIndex: `${focusRoot(cwd)}/state.json`,
+    focusState: `${focus}/state`,
+  };
+}
+
 function focusHelp(): string {
   return [
+    "focus context is injected automatically; loadout, monitor, script, and agent intents require explicit tool calls.",
+    "focus KB and state paths are project-local.",
     "focus commands:",
     "  /focus            choose current, existing, or new focus",
-    "  /focus <query>    choose a matching focus or create a new one",
+    "  /focus <query>    choose a matching focus or create a new focus",
     "  /focus new        create and activate a new focus",
     "  /focus on         return the agent to current/last focus",
+    "  /focus edit       edit active context or tool declarations",
+    "  /focus delete     delete a focus after confirmation",
+    "  /focus kb         manage active focus Markdown knowledge",
     "  /focus expand     append notes/refs/docs to active focus",
     "  /focus narrow     create an active subfocus",
     "  /focus use <id>   switch to an existing focus",
     "  /focus off        deactivate focus, keeping last focus",
-    "  /focus status     show active focus",
+    "  /focus status     show paths, restrictions, and capability availability",
   ].join("\n");
 }
