@@ -10,6 +10,15 @@ pi install git:github.com/whitmo/pi-focus
 
 Use `pi install -l` inside a project for project-local installation.
 
+## Extensions
+
+The package exposes two independently filterable extension roots:
+
+- `extensions/index.ts` — focus selection, context, and tool-policy guard
+- `extensions/compact.ts` — background compaction commands, tool, and hooks
+
+Disable either root with Pi's package extension filtering without disabling the other.
+
 ## Storage
 
 Focus definitions and resources are isolated to the project root found from Pi's current working directory:
@@ -49,6 +58,11 @@ Each running agent owns its active and last focus snapshots. Catalog edits do no
 - `/focus` — view, switch, or create a focus
 - `/focus <query>` — choose an exact/related focus or create one
 - `/focus new|on|use|edit|delete|kb|expand|narrow|off|status|help`
+- `/focus-compact` — schedule background compaction and return immediately
+- `/focus-compact-model [provider:model|off]` — show or set the session-local summary model override
+- `/focus-compact-history` — show background compactions from the active session branch
+
+Agents can schedule the same work with the `focus_compact` tool. Repeated triggers coalesce into the one active job.
 
 ## Guard-only tool policy
 
