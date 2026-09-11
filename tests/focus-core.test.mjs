@@ -3,16 +3,24 @@ import test from "node:test";
 
 import {
   addFocusNote,
-  createEmptyState,
+  addSubfocusNote,
+  createEmptyCatalog,
   createFocus,
   createSubfocus,
-  deleteFocus,
-  getActiveFocus,
-  normalizeFocusState,
-  updateFocus,
+  findFocusPath,
   findMatchingFoci,
-  setFocusOff,
+  normalizeFocusCatalog,
+  normalizeLegacyFocusState,
+  retireFocus,
+  summarizeFocusPath,
+  updateFocus,
+  updateSubfocus,
 } from "../extensions/focus-core.mjs";
+
+const NOW = "2026-09-02T00:00:00.000Z";
+const LATER = "2026-09-02T00:00:01.000Z";
+const LATEST = "2026-09-02T00:00:02.000Z";
+const LAST = "2026-09-02T00:00:03.000Z";
 
 test("keeps exact matches and caps related matches at five in stored order", () => {
   const foci = [
@@ -36,43 +44,98 @@ test("keeps exact matches and caps related matches at five in stored order", () 
   ]);
 });
 
-test("normalizes legacy focus records with safe activation defaults", () => {
-  const state = normalizeFocusState({
+test("normalizes catalogs without exposing legacy selection fields", () => {
+  const catalog = normalizeFocusCatalog({
     activeFocusId: "legacy",
     lastFocusId: "legacy",
-    foci: [{ id: "legacy", name: "Legacy", goals: "Keep working" }],
-    updatedAt: "2026-08-28T00:00:00.000Z",
+    foci: [{
+      id: "legacy",
+      name: "Legacy",
+      goals: "Keep working",
+      revision: 1,
+      createdAt: NOW,
+      updatedAt: NOW,
+    }],
+    retiredFocusIds: [],
   });
 
-  assert.deepEqual(state.foci[0].activation, undefined);
-  assert.equal(state.foci[0].subfocuses.length, 0);
-  assert.equal(state.foci[0].activeSubfocusId, null);
+  assert.deepEqual(catalog.foci[0].activation, undefined);
+  assert.equal(catalog.foci[0].subfocuses.length, 0);
+  assert.equal("activeFocusId" in catalog, false);
+  assert.equal("lastFocusId" in catalog, false);
 });
 
-test("preserves intentional empty activation tools but strips executable fields", () => {
-  let state = createEmptyState();
-  state = createFocus(state, { name: "Basic" }, "2026-08-28T00:00:00.000Z");
-  assert.equal(state.foci[0].activation, undefined);
+test("normalizes legacy state with nullable timestamps for deterministic migration", () => {
+  const state = normalizeLegacyFocusState({
+    activeFocusId: "legacy",
+    lastFocusId: "legacy",
+    foci: [{
+      id: "legacy",
+      name: "Legacy",
+      createdAt: null,
+      updatedAt: null,
+      subfocuses: [{
+        id: "legacy-child",
+        name: "Legacy child",
+        createdAt: null,
+        updatedAt: null,
+      }],
+    }],
+    updatedAt: null,
+  });
 
-  state = createFocus(state, {
-    name: "Restricted",
-    activation: { tools: [], command: "rm -rf /" },
-    command: "rm -rf /",
-    extensionPath: "/tmp/evil.mjs",
-    agent: { command: "evil" },
-  }, "2026-08-28T00:00:01.000Z");
-
-  assert.deepEqual(state.foci[1].activation, { tools: [] });
-  assert.equal("command" in state.foci[1], false);
-  assert.equal("extensionPath" in state.foci[1], false);
-  assert.equal("agent" in state.foci[1], false);
+  assert.equal(state.activeFocusId, "legacy");
+  assert.equal(state.lastFocusId, "legacy");
+  assert.equal(state.updatedAt, null);
+  assert.equal(state.foci[0].createdAt, null);
+  assert.equal(state.foci[0].updatedAt, null);
+  assert.equal(state.foci[0].subfocuses[0].createdAt, null);
+  assert.equal(state.foci[0].subfocuses[0].updatedAt, null);
 });
 
-test("normalizes bounded inert runbooks, preserves them across mutations, and retires IDs", () => {
-  const monitors = Array.from({ length: 10 }, (_, index) => `monitor-${index}`);
-  const scripts = Array.from({ length: 10 }, (_, index) => `script-${index}`);
-  const agents = Array.from({ length: 10 }, (_, index) => `agent-${index}`);
-  let state = createFocus(createEmptyState(), {
+test("creates and updates revisioned focus records without selection state", () => {
+  const created = createFocus(createEmptyCatalog(), { name: "Focus A" }, NOW);
+  assert.equal(created.focus.revision, 1);
+  assert.equal(created.focus.createdAt, NOW);
+  assert.equal(created.catalog.foci[0].id, "focus-a");
+  assert.equal("activeFocusId" in created.catalog, false);
+
+  const updated = updateFocus(
+    created.catalog,
+    created.focus.id,
+    { createdAt: NOW, revision: 1 },
+    { goals: "new goal" },
+    LATER,
+  );
+  assert.equal(updated.focus.revision, 2);
+  assert.equal(updated.focus.goals, "new goal");
+  assert.throws(
+    () => updateFocus(
+      updated.catalog,
+      updated.focus.id,
+      { createdAt: NOW, revision: 1 },
+      { scope: "stale" },
+      LATER,
+    ),
+    /stale catalog revision/,
+  );
+  assert.throws(
+    () => updateFocus(
+      updated.catalog,
+      updated.focus.id,
+      { createdAt: LATER, revision: 2 },
+      { scope: "replaced record" },
+      LATEST,
+    ),
+    /stale catalog revision/,
+  );
+});
+
+test("validates bounded inert activation declarations across focus mutations", () => {
+  const monitors = Array.from({ length: 8 }, (_, index) => `monitor-${index}`);
+  const scripts = Array.from({ length: 8 }, (_, index) => `script-${index}`);
+  const agents = Array.from({ length: 8 }, (_, index) => `agent-${index}`);
+  const created = createFocus(createEmptyCatalog(), {
     name: "Foo",
     activation: {
       loadoutPreset: "team-default",
@@ -81,7 +144,7 @@ test("normalizes bounded inert runbooks, preserves them across mutations, and re
       agents,
       command: "must be stripped",
     },
-  }, "2026-08-28T00:00:00.000Z");
+  }, NOW);
 
   const declarations = {
     loadoutPreset: "team-default",
@@ -89,71 +152,229 @@ test("normalizes bounded inert runbooks, preserves them across mutations, and re
     scripts: scripts.slice(0, 8),
     agents: agents.slice(0, 8),
   };
-  assert.deepEqual(state.foci[0].activation, declarations);
+  assert.deepEqual(created.focus.activation, declarations);
 
-  state = normalizeFocusState(JSON.parse(JSON.stringify(state)));
-  state = addFocusNote(state, "Keep this context", "2026-08-28T00:00:01.000Z");
-  state = updateFocus(state, "foo", {
-    activation: { tools: ["bash"] },
-  }, "2026-08-28T00:00:02.000Z");
-  assert.deepEqual(state.foci[0].activation, { tools: ["bash"], ...declarations });
+  const noted = addFocusNote(
+    created.catalog,
+    created.focus.id,
+    { createdAt: NOW, revision: 1 },
+    "Keep this context",
+    LATER,
+  );
+  const updated = updateFocus(
+    noted.catalog,
+    noted.focus.id,
+    { createdAt: NOW, revision: 2 },
+    { activation: { tools: ["bash"] } },
+    LATEST,
+  );
+  assert.deepEqual(updated.focus.activation, { tools: ["bash"], ...declarations });
+  assert.deepEqual(updated.focus.notes, ["Keep this context"]);
+  assert.deepEqual(
+    createFocus(createEmptyCatalog(), {
+      name: "Nine tools",
+      activation: { tools: Array.from({ length: 9 }, (_, index) => `tool-${index}`) },
+    }, NOW).focus.activation,
+    { tools: Array.from({ length: 9 }, (_, index) => `tool-${index}`) },
+  );
+  assert.throws(
+    () => createFocus(createEmptyCatalog(), {
+      name: "Long tool",
+      activation: { tools: ["x".repeat(201)] },
+    }, NOW),
+    /invalid activation metadata/i,
+  );
+  assert.throws(
+    () => createFocus(createEmptyCatalog(), {
+      name: "Nine monitors",
+      activation: { monitors: Array.from({ length: 9 }, (_, index) => `monitor-${index}`) },
+    }, NOW),
+    /invalid activation metadata/i,
+  );
 
-  state = deleteFocus(state, "foo", "2026-08-28T00:00:03.000Z");
-  assert.deepEqual(state.retiredFocusIds, ["foo"]);
-  state = createFocus(state, { name: "Foo" }, "2026-08-28T00:00:04.000Z");
-  assert.equal(state.foci[0].id, "foo-2");
+  assert.throws(
+    () => updateFocus(
+      updated.catalog,
+      updated.focus.id,
+      { createdAt: NOW, revision: 3 },
+      { activation: null },
+      LAST,
+    ),
+    /invalid activation metadata/i,
+  );
+  assert.throws(
+    () => updateFocus(
+      updated.catalog,
+      updated.focus.id,
+      { createdAt: NOW, revision: 3 },
+      { activation: "not declarations" },
+      LAST,
+    ),
+    /invalid activation metadata/i,
+  );
 });
 
-test("rejects invalid activation updates before preserving existing declarations", () => {
-  const state = createFocus(createEmptyState(), { name: "Safe", activation: { monitors: ["watch CI"] } });
+test("retires focus IDs with revision checks and never reuses them", () => {
+  const created = createFocus(createEmptyCatalog(), { name: "Foo" }, NOW);
+  assert.throws(
+    () => retireFocus(created.catalog, created.focus.id, { createdAt: NOW, revision: 2 }),
+    /stale catalog revision/,
+  );
 
-  assert.throws(() => updateFocus(state, "safe", { activation: null }), /invalid activation metadata/i);
-  assert.throws(() => updateFocus(state, "safe", { activation: "not declarations" }), /invalid activation metadata/i);
+  const retired = retireFocus(
+    created.catalog,
+    created.focus.id,
+    { createdAt: NOW, revision: 1 },
+  );
+  assert.deepEqual(retired.catalog.retiredFocusIds, ["foo"]);
+  assert.deepEqual(retired.catalog.foci, []);
+
+  const replacement = createFocus(retired.catalog, { name: "Foo" }, LATER);
+  assert.equal(replacement.focus.id, "foo-2");
 });
 
-test("updates and deletes focus records without clearing unrelated IDs", () => {
-  let state = createEmptyState();
-  state = createFocus(state, { name: "First" }, "2026-08-28T00:00:00.000Z");
-  state = createFocus(state, { name: "Second" }, "2026-08-28T00:00:01.000Z");
-  state = updateFocus(state, "first", { goals: "Updated", command: "ignored" }, "2026-08-28T00:00:02.000Z");
-  state = deleteFocus(state, "first", "2026-08-28T00:00:03.000Z");
+test("subfocuses own revisions, context, activation, notes, and path snapshots", () => {
+  const created = createFocus(createEmptyCatalog(), {
+    name: "Focus A",
+    goals: "parent goal",
+  }, NOW);
+  const childCreated = createSubfocus(created.catalog, created.focus.id, {
+    name: "Subfocus A",
+    goals: "child goal",
+    scope: "child scope",
+    constraints: "child constraint",
+    planningDocs: ["docs/child.md"],
+    refs: ["DISC-1000"],
+    notes: ["first note"],
+    activation: { tools: [], command: "must be stripped" },
+  }, LATER);
 
-  assert.deepEqual(state.foci.map((focus) => focus.id), ["second"]);
-  assert.equal(state.activeFocusId, "second");
-  assert.equal(state.lastFocusId, "second");
+  assert.equal(childCreated.focus.revision, 1);
+  assert.equal(childCreated.focus.updatedAt, NOW);
+  assert.equal(childCreated.subfocus.revision, 1);
+  assert.equal(childCreated.subfocus.parentId, created.focus.id);
+  assert.deepEqual(childCreated.subfocus.activation, { tools: [] });
+  assert.deepEqual(childCreated.subfocus.planningDocs, ["docs/child.md"]);
+  assert.deepEqual(childCreated.subfocus.refs, ["DISC-1000"]);
+
+  const childUpdated = updateSubfocus(
+    childCreated.catalog,
+    created.focus.id,
+    childCreated.subfocus.id,
+    { createdAt: LATER, revision: 1 },
+    { goals: "updated child goal", activation: { tools: ["bash"] } },
+    LATEST,
+  );
+  assert.equal(childUpdated.focus.revision, 1);
+  assert.equal(childUpdated.subfocus.revision, 2);
+  assert.equal(childUpdated.subfocus.goals, "updated child goal");
+  assert.deepEqual(childUpdated.subfocus.activation, { tools: ["bash"] });
+  assert.throws(
+    () => updateSubfocus(
+      childUpdated.catalog,
+      created.focus.id,
+      childUpdated.subfocus.id,
+      { createdAt: LATER, revision: 1 },
+      { scope: "stale" },
+      LAST,
+    ),
+    /stale catalog revision/,
+  );
+
+  const noted = addSubfocusNote(
+    childUpdated.catalog,
+    created.focus.id,
+    childUpdated.subfocus.id,
+    { createdAt: LATER, revision: 2 },
+    "second note",
+    LAST,
+  );
+  assert.equal(noted.focus.revision, 1);
+  assert.equal(noted.subfocus.revision, 3);
+  assert.deepEqual(noted.subfocus.notes, ["first note", "second note"]);
+
+  const path = findFocusPath(
+    noted.catalog,
+    created.focus.id,
+    childCreated.subfocus.id,
+  );
+  assert.deepEqual(path, {
+    focus: {
+      kind: "focus",
+      id: "focus-a",
+      parentId: null,
+      name: "Focus A",
+      createdAt: NOW,
+      updatedAt: NOW,
+      revision: 1,
+      goals: "parent goal",
+      scope: "",
+      constraints: "",
+      planningDocs: [],
+      refs: [],
+      notes: [],
+    },
+    subfocus: {
+      kind: "subfocus",
+      id: "subfocus-a",
+      parentId: "focus-a",
+      name: "Subfocus A",
+      createdAt: LATER,
+      updatedAt: LAST,
+      revision: 3,
+      goals: "updated child goal",
+      scope: "child scope",
+      constraints: "child constraint",
+      planningDocs: ["docs/child.md"],
+      refs: ["DISC-1000"],
+      notes: ["first note", "second note"],
+      activation: { tools: ["bash"] },
+    },
+  });
+  assert.equal(Object.isFrozen(path), true);
+  assert.equal(Object.isFrozen(path.subfocus), true);
+  assert.equal(summarizeFocusPath(path), [
+    "Focus: Focus A",
+    "Goals: parent goal",
+    "Subfocus: Subfocus A",
+    "Subfocus goals: updated child goal",
+    "Subfocus scope: child scope",
+    "Subfocus constraints: child constraint",
+  ].join("\n"));
 });
 
-test("creates, expands, narrows, and deactivates focus state", () => {
-  let state = createEmptyState();
+test("rejects sparse catalog and activation lists", () => {
+  const sparseFoci = Array(1);
+  const sparsePlanningDocs = ["plan", , "reference"];
+  const sparseTools = ["read", , "grep"];
 
-  state = createFocus(state, {
-    name: "Release planning",
-    goals: "Ship the release checklist",
-    scope: "Web app",
-    constraints: "Small diff only",
-    planningDocs: ["docs/release-plan.md"],
-    refs: ["Issue #123"],
-  }, "2026-08-05T12:00:00.000Z");
+  assert.throws(
+    () => normalizeFocusCatalog({ foci: sparseFoci }),
+    /invalid catalog schema/i,
+  );
+  assert.throws(
+    () => createFocus(createEmptyCatalog(), { name: "Sparse planning", planningDocs: sparsePlanningDocs }, NOW),
+    /invalid catalog schema/i,
+  );
+  assert.throws(
+    () => createFocus(createEmptyCatalog(), { name: "Sparse tools", activation: { tools: sparseTools } }, NOW),
+    /invalid activation metadata/i,
+  );
+});
 
-  assert.equal(state.activeFocusId, "release-planning");
-  assert.equal(state.lastFocusId, "release-planning");
-  assert.equal(getActiveFocus(state).name, "Release planning");
+test("focus and subfocus IDs reserve suffix space within 200 characters", () => {
+  const longName = "A".repeat(250);
+  const first = createFocus(createEmptyCatalog(), { name: longName }, NOW);
+  const second = createFocus(first.catalog, { name: longName }, LATER);
+  assert.equal(first.focus.id, "a".repeat(200));
+  assert.equal(second.focus.id, `${"a".repeat(198)}-2`);
+  assert.equal(first.focus.id.length, 200);
+  assert.equal(second.focus.id.length, 200);
 
-  state = addFocusNote(state, "Added issue #42", "2026-08-05T12:01:00.000Z");
-  assert.deepEqual(getActiveFocus(state).notes, ["Added issue #42"]);
-
-  state = createSubfocus(state, {
-    name: "PR review",
-    goals: "Address blocking comments",
-    scope: "Only reviewed lines",
-    constraints: "No unrelated cleanup",
-  }, "2026-08-05T12:02:00.000Z");
-
-  const active = getActiveFocus(state);
-  assert.equal(active.activeSubfocusId, "pr-review");
-  assert.equal(active.subfocuses[0].name, "PR review");
-
-  state = setFocusOff(state, "2026-08-05T12:03:00.000Z");
-  assert.equal(state.activeFocusId, null);
-  assert.equal(state.lastFocusId, "release-planning");
+  const firstChild = createSubfocus(second.catalog, first.focus.id, { name: longName }, LATEST);
+  const secondChild = createSubfocus(firstChild.catalog, first.focus.id, { name: longName }, LAST);
+  assert.equal(firstChild.subfocus.id, "a".repeat(200));
+  assert.equal(secondChild.subfocus.id, `${"a".repeat(198)}-2`);
+  assert.equal(firstChild.subfocus.id.length, 200);
+  assert.equal(secondChild.subfocus.id.length, 200);
 });

@@ -31,5 +31,8 @@
   "pi": {
     "extensions": ["./extensions/index.ts"],
     "skills": ["./skills/focus"]
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
   }
 }
