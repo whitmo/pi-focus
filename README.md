@@ -10,6 +10,15 @@ pi install git:github.com/whitmo/pi-focus
 
 Use `pi install -l` inside a project for project-local installation.
 
+## Extensions
+
+The package exposes two independently filterable extension roots:
+
+- `extensions/index.ts` — focus selection, context, and tool-policy guard
+- `extensions/compact.ts` — background compaction commands, tool, and hooks
+
+Disable either root with Pi's package extension filtering without disabling the other.
+
 ## Storage
 
 Focus definitions and resources are isolated to the project root found from Pi's current working directory:
@@ -49,6 +58,27 @@ Each running agent owns its active and last focus snapshots. Catalog edits do no
 - `/focus` — view, switch, or create a focus
 - `/focus <query>` — choose an exact/related focus or create one
 - `/focus new|on|use|edit|delete|kb|expand|narrow|off|status|help`
+- `/focus-compact` — schedule background compaction and return immediately
+- `/focus-compact-model [provider:model|off]` — show or set the session-local summary model override
+- `/focus-compact-history` — show background compactions from the active session branch
+
+Agents can schedule the same work with the `focus_compact` tool. Repeated triggers coalesce into the one active job.
+
+## Background compaction
+
+At a trigger, `compact.ts` appends an invisible boundary before starting asynchronous summarization. Interaction continues while it summarizes the complete logical context before that boundary through the captured focus lens. When the result is ready and still valid, Pi's native compaction path replaces the pre-boundary logical context with the summary and preserves every post-boundary entry.
+
+Automatic scheduling uses the exact soft cap `min(150,000, floor(0.75 × current model context window))`. Missing usage or context-window data disables only automatic scheduling; manual scheduling remains available.
+
+The summary model defaults to the current session model at capture time. `/focus-compact-model` stores an optional override only in versioned entries on that session's active branch; it does not write project focus state or global Pi settings.
+
+Pi's append-only session JSONL remains the archive: original entries are not rewritten or deleted. `/focus-compact-history` reads native compaction entries and creates no duplicate transcript or index file. An uncommitted job is in-memory only and does not resume across process restarts.
+
+If hard context overflow occurs before a background result is ready, the extension leaves recovery to Pi's default blocking compaction.
+
+## Rollout compatibility
+
+Only one extension may own generic compaction hooks during rollout. Disable competing generic compaction and compact-model handlers before enabling `compact.ts`. Configurable `pi-vcc` and Goosedump workflows are deferred to the next PR.
 
 ## Guard-only tool policy
 
@@ -56,7 +86,7 @@ A bound focus or subfocus may declare allowed tool names. `pi-focus` guards each
 
 `pi-focus` never calls `setActiveTools`. It neither enables nor disables host tools, and it does not restore tool sets. The declaration is only a guard over tools already active in the host.
 
-`pi-loadout` and `@juicesharp/rpiv-ask-user-question` are optional peer dependencies; no host package is required as a peer. `pi-focus` works without either.
+`@earendil-works/pi-coding-agent` and `typebox` are required peers. `pi-loadout` and `@juicesharp/rpiv-ask-user-question` are optional peers; `pi-focus` works without either optional package.
 
 The loadout seam is an agent's explicit `loadout_profile` `push`/`pop` action, not automatic extension invocation. Monitor, script, and subagent intents are declarative runbooks: they require explicit actions. Automatic runtime supervision is not included.
 
