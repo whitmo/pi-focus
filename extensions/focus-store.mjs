@@ -17,7 +17,9 @@ const EPOCH = "1970-01-01T00:00:00.000Z";
 const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n([\s\S]*))?$/;
 
 export function focusRoot(cwd) {
-  return join(projectRoot(cwd), ".agents", "focus");
+  const agents = join(projectRoot(cwd), ".agents");
+  assertDirectory(agents);
+  return join(agents, "focus");
 }
 
 export function focusDirectory(cwd, focusId) {

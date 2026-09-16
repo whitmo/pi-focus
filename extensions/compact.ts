@@ -477,8 +477,11 @@ export default function compactExtension(pi: ExtensionAPI): void {
         return;
       }
       if (value === "off") {
-        pi.appendEntry(MODEL_CUSTOM_TYPE, createModelSetting(null));
-        modelKey = null;
+        try {
+          pi.appendEntry(MODEL_CUSTOM_TYPE, createModelSetting(null));
+        } finally {
+          modelKey = restoreModelSetting(ctx.sessionManager.getBranch()).modelKey;
+        }
         notify(ctx, "focus compact model: current session model", "info");
         return;
       }
@@ -491,8 +494,11 @@ export default function compactExtension(pi: ExtensionAPI): void {
         notify(ctx, `focus compact model: unknown model ${value}`, "warning");
         return;
       }
-      pi.appendEntry(MODEL_CUSTOM_TYPE, createModelSetting(value));
-      modelKey = value;
+      try {
+        pi.appendEntry(MODEL_CUSTOM_TYPE, createModelSetting(value));
+      } finally {
+        modelKey = restoreModelSetting(ctx.sessionManager.getBranch()).modelKey;
+      }
       notify(ctx, `focus compact model: ${value}`, "info");
     },
   });

@@ -136,8 +136,12 @@ export default function focusExtension(pi: ExtensionAPI): void {
   };
 
   const bindCatalogFocus = (ctx: CommandContext, focusId: string, subfocusId: string | null = null, steer = true): void => {
-    const path = findFocusPath(loadFocusCatalog(sessionCwd), focusId, subfocusId) as FocusPath;
-    bindPath(ctx, path, steer);
+    try {
+      const path = findFocusPath(loadFocusCatalog(sessionCwd), focusId, subfocusId) as FocusPath;
+      bindPath(ctx, path, steer);
+    } catch (error) {
+      ctx.ui.notify(`focus: unable to bind selected focus: ${(error as Error).message}`, "warning");
+    }
   };
 
   pi.on("session_start", async (event, ctx: CommandContext) => {
