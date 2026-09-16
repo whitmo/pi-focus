@@ -239,15 +239,21 @@ export default function compactExtension(pi: ExtensionAPI): void {
     const id = randomUUID();
     const focusBinding = restoreFocusBinding(activeBranch);
     const modelName = `${selectedModel.provider}:${selectedModel.id}`;
-    pi.appendEntry(BOUNDARY_CUSTOM_TYPE, createBoundaryPayload({
-      jobId: id,
-      sessionId,
-      sessionHeaderId,
-      preBoundaryLeafId,
-      priorCompactionId,
-      focusBinding,
-      model: modelName,
-    }));
+    try {
+      pi.appendEntry(BOUNDARY_CUSTOM_TYPE, createBoundaryPayload({
+        jobId: id,
+        sessionId,
+        sessionHeaderId,
+        preBoundaryLeafId,
+        priorCompactionId,
+        focusBinding,
+        model: modelName,
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      notify(ctx, `focus compact: boundary persistence failed: ${message}`, "warning");
+      return { cancel: true };
+    }
     const boundaryId = ctx.sessionManager.getLeafId();
     if (boundaryId === null || boundaryId === preBoundaryLeafId) {
       notify(ctx, "focus compact: boundary capture failed", "warning");
