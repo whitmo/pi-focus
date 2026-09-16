@@ -286,7 +286,7 @@ async function handleChooser(ctx: CommandContext, bindCatalogFocus: BindCatalogF
   const selected = await ctx.ui.select(query ? `Focus matches for “${query}”` : "Focus", options);
   if (!selected) return;
   if (!query) {
-    if (selected === options[0]) return handleStatus(ctx, null, capabilities);
+    if (selected === options[0]) return handleStatus(ctx, restoreFocusBinding(ctx.sessionManager.getBranch())?.binding.active ?? null, capabilities);
     if (selected === options[1]) return handleSwitch(ctx, bindCatalogFocus);
     return handleNew(ctx, (commandCtx, path, steer) => bindCatalogFocus(commandCtx, path.focus.id, path.subfocus?.id ?? null, steer));
   }
