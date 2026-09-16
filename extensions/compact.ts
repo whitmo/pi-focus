@@ -349,6 +349,13 @@ export default function compactExtension(pi: ExtensionAPI): void {
     }
     cancelOwnedWork(false);
   });
+  pi.on("session_tree", (_event, ctx: ExtensionContext) => {
+    const restored = restoreModelSetting(ctx.sessionManager.getBranch());
+    modelKey = restored.modelKey;
+    if (restored.invalidLatest) {
+      notify(ctx, "focus compact: invalid model setting; using current session model", "warning");
+    }
+  });
 
   pi.on("session_shutdown", () => {
     cancelOwnedWork(true);
