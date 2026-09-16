@@ -638,9 +638,10 @@ function assertWritableContainer(catalog, focusId, subfocusId) {
 
 function existingContainerPaths(cwd, focusId, subfocusId) {
   const root = focusRoot(cwd);
+  assertDirectory(join(projectRoot(cwd), ".agents"));
   const foci = join(root, "foci");
   assertDirectory(root);
-  assertDirectory(foci);
+  assertDirectory(foci)
   const focus = focusDirectory(cwd, focusId);
   assertDirectory(focus);
   const container = subfocusId === null
