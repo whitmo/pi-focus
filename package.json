@@ -29,17 +29,17 @@
     }
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.85.1",
-    "@types/node": "^26.5.1",
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "@types/node": "^24.0.0",
     "jiti": "^2.7.0",
-    "typebox": "1.3.30",
-    "typescript": "7.0.2"
+    "typebox": "1.3.7",
+    "typescript": "5.9.3"
   },
   "pi": {
     "extensions": ["./extensions/index.ts", "./extensions/compact.ts"],
-    "skills": ["./skills/focus", "./skills/focus-info"]
+    "skills": ["./skills/focus"]
   },
   "dependencies": {
-    "yaml": "^2.9.1"
+    "yaml": "^2.9.0"
   }
 }

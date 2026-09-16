@@ -136,8 +136,12 @@ export default function focusExtension(pi: ExtensionAPI): void {
   };
 
   const bindCatalogFocus = (ctx: CommandContext, focusId: string, subfocusId: string | null = null, steer = true): void => {
-    const path = findFocusPath(loadFocusCatalog(sessionCwd), focusId, subfocusId) as FocusPath;
-    bindPath(ctx, path, steer);
+    try {
+      const path = findFocusPath(loadFocusCatalog(sessionCwd), focusId, subfocusId) as FocusPath;
+      bindPath(ctx, path, steer);
+    } catch (error) {
+      ctx.ui.notify(`focus: unable to bind selected focus: ${(error as Error).message}`, "warning");
+    }
   };
 
   pi.on("session_start", async (event, ctx: CommandContext) => {
@@ -286,7 +290,7 @@ async function handleChooser(ctx: CommandContext, bindCatalogFocus: BindCatalogF
   const selected = await ctx.ui.select(query ? `Focus matches for “${query}”` : "Focus", options);
   if (!selected) return;
   if (!query) {
-    if (selected === options[0]) return handleStatus(ctx, null, capabilities);
+    if (selected === options[0]) return handleStatus(ctx, restoreFocusBinding(ctx.sessionManager.getBranch())?.binding.active ?? null, capabilities);
     if (selected === options[1]) return handleSwitch(ctx, bindCatalogFocus);
     return handleNew(ctx, (commandCtx, path, steer) => bindCatalogFocus(commandCtx, path.focus.id, path.subfocus?.id ?? null, steer));
   }
