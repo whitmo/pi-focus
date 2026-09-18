@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { createFocus, updateFocus } from "../extensions/focus-core.mjs";
+import { createFocus, createSubfocus, retireFocus, updateFocus } from "../extensions/focus-core.mjs";
 import { findFocusPath } from "../extensions/focus-core.mjs";
 import { FOCUS_BINDING_CUSTOM_TYPE, createLocalFocusBinding, restoreFocusBinding } from "../extensions/focus-session.mjs";
 import { loadFocusCatalog, updateFocusCatalog } from "../extensions/focus-store.mjs";
@@ -24,16 +24,21 @@ function createCatalog() {
     goals: "Alpha goal",
     activation: { tools: ["read"] },
   }, NOW));
+  const alphaChild = updateFocusCatalog(cwd, (catalog) => createSubfocus(catalog, alpha.focus.id, {
+    name: "Alpha child",
+    goals: "Alpha child goal",
+  }, NOW));
   const beta = updateFocusCatalog(cwd, (catalog) => createFocus(catalog, {
     name: "Beta",
     goals: "Beta goal",
     activation: { tools: ["bash"] },
   }, NOW));
-  return { cwd, alpha, beta };
+  return { cwd, alpha, alphaChild, beta };
 }
 
 function createHarness(cwd, sessionId, options = {}) {
   const events = new Map();
+  const bus = new Map();
   const commands = new Map();
   const notices = [];
   const status = new Map();
@@ -50,6 +55,7 @@ function createHarness(cwd, sessionId, options = {}) {
   };
   const pi = {
     on(name, handler) { events.set(name, handler); },
+    events: { on(name, handler) { bus.set(name, handler); return () => bus.delete(name); } },
     registerCommand(name, command) { commands.set(name, command); },
     appendEntry(customType, data) {
       sessionManager.branch.push({
@@ -88,6 +94,7 @@ function createHarness(cwd, sessionId, options = {}) {
   };
   extension.default(pi);
   return {
+    bus,
     commands,
     ctx,
     events,
@@ -109,10 +116,120 @@ async function use(harness, id) {
   await harness.commands.get("focus").handler(`use ${id}`, harness.ctx);
 }
 
+function bindChild(harness, focus) {
+  let acknowledgement;
+  harness.bus.get("pi-focus:bind-child")?.({
+    ...focus,
+    acknowledge(result) { acknowledgement = result; },
+  });
+  return acknowledgement;
+}
+
 function contextText(harness) {
   const result = harness.events.get("context")({ messages: [] }, harness.ctx);
   return result.messages.at(-1)?.content?.[0]?.text ?? "";
 }
+
+test("child startup binds a catalog focus/subfocus locally before context and guards", async (t) => {
+  const { cwd, alpha, alphaChild } = createCatalog();
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const parent = createHarness(cwd, "parent");
+  const a = createHarness(cwd, "child-a");
+  const b = createHarness(cwd, "child-b");
+  await Promise.all([start(parent), start(a), start(b)]);
+  await use(parent, "beta");
+  const parentBefore = structuredClone(parent.sessionManager.getBranch());
+
+  assert.deepEqual(bindChild(a, { focusId: alpha.focus.id, subfocusId: alphaChild.subfocus.id }), { ok: true });
+  assert.deepEqual(bindChild(b, { focusId: "beta" }), { ok: true });
+  assert.deepEqual(parent.sessionManager.getBranch(), parentBefore);
+
+  const stored = restoreFocusBinding(a.sessionManager.getBranch()).binding;
+  assert.equal(stored.agentSessionId, "child-a");
+  assert.equal(stored.active.focus.id, "alpha");
+  assert.equal(stored.active.subfocus.id, "alpha-child");
+  assert.equal(Object.isFrozen(stored.active.focus), true);
+  assert.match(contextText(a), /Focus: Alpha/);
+  assert.match(contextText(a), /Subfocus: Alpha child/);
+  assert.match(a.events.get("tool_call")({ toolName: "bash" }, a.ctx).reason, /not declared/);
+  assert.equal(a.events.get("tool_call")({ toolName: "read" }, a.ctx), undefined);
+  assert.match(contextText(b), /Focus: Beta/);
+  assert.equal(a.setActiveToolsCalls, 0);
+  assert.equal(b.setActiveToolsCalls, 0);
+
+  updateFocusCatalog(cwd, (catalog) => updateFocus(
+    catalog,
+    "alpha",
+    { createdAt: alpha.focus.createdAt, revision: alpha.focus.revision },
+    { goals: "changed after capture" },
+    NOW,
+  ));
+  assert.match(contextText(a), /Alpha goal/);
+  assert.doesNotMatch(contextText(a), /changed after capture/);
+});
+
+test("child startup acknowledges malformed, missing, retired, conflicting, and persistence failures", async (t) => {
+  const { cwd, alpha } = createCatalog();
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const h = createHarness(cwd, "child");
+  await start(h);
+  const initialEntries = h.sessionManager.getBranch().length;
+
+  for (const selector of [
+    {},
+    { focusId: "INVALID!" },
+    { focusId: "missing" },
+    { focusId: "alpha", subfocusId: "missing" },
+  ]) {
+    const acknowledgement = bindChild(h, selector);
+    assert.equal(acknowledgement.ok, false);
+    assert.match(acknowledgement.error, /focus/i);
+    assert.equal(h.sessionManager.getBranch().length, initialEntries);
+  }
+
+  updateFocusCatalog(cwd, (catalog) => retireFocus(
+    catalog,
+    alpha.focus.id,
+    { createdAt: alpha.focus.createdAt, revision: alpha.focus.revision },
+  ));
+  const retired = bindChild(h, { focusId: "alpha" });
+  assert.equal(retired.ok, false);
+  assert.match(retired.error, /focus/i);
+
+  h.throwAfterAppend = true;
+  const persistence = bindChild(h, { focusId: "beta" });
+  assert.equal(persistence.ok, false);
+  assert.match(persistence.error, /persistence/i);
+});
+
+test("cold resume restores its snapshot and rejects a conflicting startup selector", async (t) => {
+  const { cwd } = createCatalog();
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const original = createLocalFocusBinding({
+    agentSessionId: "saved-session",
+    capturedAt: NOW,
+    active: findFocusPath(loadFocusCatalog(cwd), "alpha"),
+    last: findFocusPath(loadFocusCatalog(cwd), "alpha"),
+  });
+  const h = createHarness(cwd, "saved-session", { branch: [{
+    id: "saved-entry",
+    type: "custom",
+    customType: FOCUS_BINDING_CUSTOM_TYPE,
+    data: original,
+  }] });
+
+  await start(h, "resume");
+  assert.match(contextText(h), /Focus: Alpha/);
+  assert.equal(h.sessionManager.getBranch().length, 1);
+  assert.deepEqual(bindChild(h, { resume: true }), { ok: true });
+  assert.equal(h.sessionManager.getBranch().length, 1);
+  assert.deepEqual(bindChild(h, { focusId: "alpha" }), { ok: true });
+  assert.equal(h.sessionManager.getBranch().length, 1);
+  const conflict = bindChild(h, { focusId: "beta" });
+  assert.equal(conflict.ok, false);
+  assert.match(conflict.error, /conflict/i);
+  assert.match(contextText(h), /Focus: Alpha/);
+});
 
 test("extension instances keep context and guards session-local without changing tools", async (t) => {
   const { cwd } = createCatalog();
@@ -157,7 +274,7 @@ test("reload, fresh starts, fork/clone, tree, and shutdown follow the standalone
   await start(reload, "reload");
   assert.match(contextText(reload), /Focus: Alpha/);
 
-  for (const reason of ["startup", "new", "resume"]) {
+  for (const reason of ["startup", "new"]) {
     const fresh = createHarness(cwd, `${reason}-session`, { branch: [{
       id: "historical", type: "custom", customType: FOCUS_BINDING_CUSTOM_TYPE, data: saved,
     }] });
@@ -166,6 +283,14 @@ test("reload, fresh starts, fork/clone, tree, and shutdown follow the standalone
     assert.equal(restored.binding.active, null, `${reason} must append off`);
     assert.equal(contextText(fresh), "");
   }
+
+  const resume = createHarness(cwd, "resume-session", { branch: [{
+    id: "historical", type: "custom", customType: FOCUS_BINDING_CUSTOM_TYPE, data: saved,
+  }] });
+  await start(resume, "resume");
+  assert.equal(restoreFocusBinding(resume.sessionManager.getBranch()).binding.active.focus.id, "alpha");
+  assert.equal(resume.sessionManager.getBranch().length, 1);
+  assert.match(contextText(resume), /Focus: Alpha/);
 
   for (const action of ["fork", "clone"]) {
     const child = createHarness(cwd, `${action}-session`, { branch: [{
