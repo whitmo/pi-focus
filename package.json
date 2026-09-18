@@ -37,7 +37,7 @@
   },
   "pi": {
     "extensions": ["./extensions/index.ts", "./extensions/compact.ts"],
-    "skills": ["./skills/focus", "./skills/focus-info"]
+    "skills": ["./skills/focus"]
   },
   "dependencies": {
     "yaml": "^2.9.0"

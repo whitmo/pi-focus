@@ -239,15 +239,21 @@ export default function compactExtension(pi: ExtensionAPI): void {
     const id = randomUUID();
     const focusBinding = restoreFocusBinding(activeBranch);
     const modelName = `${selectedModel.provider}:${selectedModel.id}`;
-    pi.appendEntry(BOUNDARY_CUSTOM_TYPE, createBoundaryPayload({
-      jobId: id,
-      sessionId,
-      sessionHeaderId,
-      preBoundaryLeafId,
-      priorCompactionId,
-      focusBinding,
-      model: modelName,
-    }));
+    try {
+      pi.appendEntry(BOUNDARY_CUSTOM_TYPE, createBoundaryPayload({
+        jobId: id,
+        sessionId,
+        sessionHeaderId,
+        preBoundaryLeafId,
+        priorCompactionId,
+        focusBinding,
+        model: modelName,
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      notify(ctx, `focus compact: boundary persistence failed: ${message}`, "warning");
+      return { cancel: true };
+    }
     const boundaryId = ctx.sessionManager.getLeafId();
     if (boundaryId === null || boundaryId === preBoundaryLeafId) {
       notify(ctx, "focus compact: boundary capture failed", "warning");
@@ -342,6 +348,13 @@ export default function compactExtension(pi: ExtensionAPI): void {
       return;
     }
     cancelOwnedWork(false);
+  });
+  pi.on("session_tree", (_event, ctx: ExtensionContext) => {
+    const restored = restoreModelSetting(ctx.sessionManager.getBranch());
+    modelKey = restored.modelKey;
+    if (restored.invalidLatest) {
+      notify(ctx, "focus compact: invalid model setting; using current session model", "warning");
+    }
   });
 
   pi.on("session_shutdown", () => {
@@ -464,8 +477,11 @@ export default function compactExtension(pi: ExtensionAPI): void {
         return;
       }
       if (value === "off") {
-        pi.appendEntry(MODEL_CUSTOM_TYPE, createModelSetting(null));
-        modelKey = null;
+        try {
+          pi.appendEntry(MODEL_CUSTOM_TYPE, createModelSetting(null));
+        } finally {
+          modelKey = restoreModelSetting(ctx.sessionManager.getBranch()).modelKey;
+        }
         notify(ctx, "focus compact model: current session model", "info");
         return;
       }
@@ -478,8 +494,11 @@ export default function compactExtension(pi: ExtensionAPI): void {
         notify(ctx, `focus compact model: unknown model ${value}`, "warning");
         return;
       }
-      pi.appendEntry(MODEL_CUSTOM_TYPE, createModelSetting(value));
-      modelKey = value;
+      try {
+        pi.appendEntry(MODEL_CUSTOM_TYPE, createModelSetting(value));
+      } finally {
+        modelKey = restoreModelSetting(ctx.sessionManager.getBranch()).modelKey;
+      }
       notify(ctx, `focus compact model: ${value}`, "info");
     },
   });
