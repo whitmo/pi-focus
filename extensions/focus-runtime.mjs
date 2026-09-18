@@ -7,9 +7,10 @@ const MAX_COMPACT_NAME_LENGTH = 200;
 const MAX_COMPACT_ROOT_LENGTH = 500;
 const MAX_COMPACT_PATH_LENGTH = 250;
 
-export function activationCapabilities(registeredToolNames, activeToolNames = registeredToolNames) {
+export function activationCapabilities(registeredToolNames, activeToolNames = registeredToolNames, commandNames = []) {
   const registeredTools = names(registeredToolNames);
   const activeTools = names(activeToolNames);
+  const registeredCommands = names(commandNames);
   const registered = new Set(registeredTools);
   const active = new Set(activeTools);
   const availableTools = registeredTools.filter((name) => active.has(name));
@@ -17,7 +18,8 @@ export function activationCapabilities(registeredToolNames, activeToolNames = re
     registeredTools,
     activeTools,
     availableTools,
-    loadoutProfile: capability("loadout_profile", registered, active),
+    registeredCommands,
+    loadout: loadoutCapability(registeredCommands, registered, active),
     process: capability("process", registered, active),
     subagent: capability("subagent", registered, active),
   };
@@ -91,14 +93,45 @@ function section(heading, lines) {
   return [heading, ...lines.filter(Boolean)].join("\n");
 }
 
+function loadoutCapability(commandNames, registered, active) {
+  if (commandNames.some((name) => name === "loadout" || /^loadout:\d+$/.test(name))) {
+    return {
+      available: true,
+      active: true,
+      interface: "command",
+      status: "/loadout available (live host selection)",
+    };
+  }
+
+  if (registered.has("loadout_profile")) {
+    const isActive = active.has("loadout_profile");
+    return {
+      available: true,
+      active: isActive,
+      interface: "legacy-tool",
+      status: isActive
+        ? "legacy loadout_profile tool active"
+        : "legacy loadout_profile tool inactive",
+    };
+  }
+
+  return {
+    available: false,
+    active: false,
+    interface: "none",
+    status: "pi-loadout unavailable (optional)",
+  };
+}
+
 function capability(name, registered, active) {
   if (!registered.has(name)) return { available: false, active: false, status: "unregistered/unavailable; requires explicit invocation" };
   if (!active.has(name)) return { available: true, active: false, status: "registered but inactive; available for explicit activation" };
   return { available: true, active: true, status: "active and registered; requires explicit invocation" };
 }
 
-function capabilityText(capability) {
-  return capability?.status ?? "unregistered/unavailable; requires explicit invocation";
+function capabilityState(capability) {
+  if (!capability?.available) return "unavailable";
+  return capability.active ? "active" : "inactive";
 }
 
 function containerContext(label, container) {
@@ -162,7 +195,7 @@ function compactContainerPaths(paths, includeSubfocus) {
 function activationLines(label, activation = {}) {
   return [
     `- ${label} tools: ${activation.tools === undefined ? "none" : list(activation.tools)}`,
-    `- ${label} loadout preset intent: ${field(activation.loadoutPreset) || "none"}`,
+    `- ${label} loadout preset declaration: ${field(activation.loadoutPreset) || "none (does not override the host loadout)"}`,
     `- ${label} monitor runbooks: ${list(activation.monitors)}`,
     `- ${label} script runbooks: ${list(activation.scripts)}`,
     `- ${label} agent runbooks: ${list(activation.agents)}`,
@@ -172,7 +205,7 @@ function activationLines(label, activation = {}) {
 function compactActivationLines(label, activation = {}) {
   return [
     `- ${label} tools: ${count(activation.tools, "tool")}`,
-    `- ${label} loadout preset intent: ${activation.loadoutPreset ? "set" : "none"}`,
+    `- ${label} loadout preset declaration: ${activation.loadoutPreset ? "set" : "none"}`,
     `- ${label} monitor runbooks: ${count(activation.monitors, "runbook")}`,
     `- ${label} script runbooks: ${count(activation.scripts, "runbook")}`,
     `- ${label} agent runbooks: ${count(activation.agents, "runbook")}`,
@@ -180,21 +213,26 @@ function compactActivationLines(label, activation = {}) {
 }
 
 function guardLines(policy, capabilities) {
+  const registeredCount = capabilities?.registeredTools?.length ?? 0;
+  const activeCount = capabilities?.availableTools?.length ?? 0;
   return [
     `- Effective declared tools: ${policy === null ? "none" : list(policy.declared)}`,
-    `- Active + registered: ${policy === null ? "no focus policy" : list(policy.allowed)}`,
+    `- Active + registered: ${policy === null ? "not restricted by focus" : list(policy.allowed)}`,
     `- Unavailable by host policy: ${policy === null ? "none" : list(policy.unavailable)}`,
-    "- Requires explicit invocation: declarations only guard currently active tools; they do not run loadouts, processes, scripts, or subagents.",
-    `- Optional capability status: loadout_profile ${capabilityText(capabilities?.loadoutProfile)}, process ${capabilityText(capabilities?.process)}, subagent ${capabilityText(capabilities?.subagent)}.`,
+    policy === null
+      ? `- Focus guard: none; current host loadout remains authoritative. Host loadout: ${activeCount}/${registeredCount} registered tools active.`
+      : `- Focus guard: declared tools are intersected with the current host loadout. Host loadout: ${activeCount}/${registeredCount} registered tools active.`,
+    `- Loadout integration: ${capabilities?.loadout?.status ?? "pi-loadout unavailable (optional)"}. Requires explicit invocation: preset and runbook declarations. Optional tools: process ${capabilityState(capabilities?.process)}, subagent ${capabilityState(capabilities?.subagent)}.`,
   ];
 }
 
 function compactGuardLines(policy, capabilities) {
+  const lines = guardLines(policy, capabilities);
   return [
     `- Effective declared tools: ${policy === null ? "none" : count(policy.declared, "tool")}`,
-    `- Active + registered: ${policy === null ? "no focus policy" : count(policy.allowed, "tool")}`,
+    `- Active + registered: ${policy === null ? "not restricted by focus" : count(policy.allowed, "tool")}`,
     `- Unavailable by host policy: ${policy === null ? "none" : count(policy.unavailable, "tool")}`,
-    ...guardLines(null, capabilities).slice(3),
+    ...lines.slice(3),
   ];
 }
 

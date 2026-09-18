@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
 type ToolInfo = { name: string };
+type CommandInfo = { name: string; source?: string };
 type AutocompleteItem = { value: string; label: string };
 
 type FocusPath = {
@@ -61,6 +62,7 @@ type ExtensionAPI = {
   sendUserMessage?: (message: string, options?: { deliverAs: "followUp" }) => void;
   getActiveTools?: () => string[];
   getAllTools?: () => ToolInfo[];
+  getCommands?: () => CommandInfo[];
 };
 
 // @ts-ignore JavaScript helpers keep the extension testable with node:test.
@@ -109,7 +111,10 @@ export default function focusExtension(pi: ExtensionAPI): void {
 
   const registeredTools = (): string[] => pi.getAllTools?.().map((tool) => tool.name) ?? [];
   const activeTools = (): string[] => pi.getActiveTools?.() ?? [];
-  const capabilities = () => activationCapabilities(registeredTools(), activeTools());
+  const registeredCommands = (): string[] => pi.getCommands?.()
+    .filter((command) => command.source === "extension")
+    .map((command) => command.name) ?? [];
+  const capabilities = () => activationCapabilities(registeredTools(), activeTools(), registeredCommands());
 
   const appendAndReconcile = (ctx: CommandContext, binding: FocusBindingV1): void => {
     try {
@@ -118,7 +123,7 @@ export default function focusExtension(pi: ExtensionAPI): void {
       ctx.ui.notify(`focus: binding persistence failed: ${(error as Error).message}`, "warning");
     }
     current = restoreFocusBinding(ctx.sessionManager.getBranch());
-    updateFocusStatus(ctx, current?.binding.active ?? null, capabilities());
+    updateFocusStatus(ctx, current?.binding.active ?? null);
   };
 
   const appendLocal = (ctx: CommandContext, active: FocusPath | null, last: FocusPath | null = active): void => {
@@ -148,7 +153,7 @@ export default function focusExtension(pi: ExtensionAPI): void {
     sessionCwd = ctx.cwd;
     if (event.reason === "reload") {
       current = restoreFocusBinding(ctx.sessionManager.getBranch());
-      updateFocusStatus(ctx, current?.binding.active ?? null, capabilities());
+      updateFocusStatus(ctx, current?.binding.active ?? null);
       return;
     }
 
@@ -258,9 +263,9 @@ export default function focusExtension(pi: ExtensionAPI): void {
       } else if (sub === "status") {
         handleStatus(ctx, current?.binding.active ?? null, capabilities());
       } else if (sub === "edit") {
-        await handleEdit(ctx, current?.binding.active ?? null, bindPath, capabilities());
+        await handleEdit(ctx, current?.binding.active ?? null, bindPath);
       } else if (sub === "delete") {
-        await handleDelete(ctx, current?.binding.active ?? null, appendAndReconcile, capabilities());
+        await handleDelete(ctx, current?.binding.active ?? null, appendAndReconcile);
       } else if (sub === "kb") {
         await handleKnowledgeBase(ctx, current?.binding.active ?? null);
       } else if (sub === "use") {
@@ -376,7 +381,7 @@ async function handleUse(ctx: CommandContext, idOrName: string, bindCatalogFocus
   bindCatalogFocus(ctx, focus.id, null, true);
 }
 
-async function handleEdit(ctx: CommandContext, active: FocusPath | null, bindPath: BindPath, capabilities: ReturnType<typeof activationCapabilities>): Promise<void> {
+async function handleEdit(ctx: CommandContext, active: FocusPath | null, bindPath: BindPath): Promise<void> {
   if (!active) {
     ctx.ui.notify("focus: no active focus to edit", "warning");
     return;
@@ -408,14 +413,14 @@ async function handleEdit(ctx: CommandContext, active: FocusPath | null, bindPat
       ? updateSubfocus(catalog, active.focus.id, active.subfocus.id, expected(active.subfocus), input)
       : updateFocus(catalog, active.focus.id, expected(active.focus), input));
     bindPath(ctx, findFocusPath(result.catalog, active.focus.id, active.subfocus?.id ?? null), false);
-    updateFocusStatus(ctx, activePath(ctx), capabilities);
+    updateFocusStatus(ctx, activePath(ctx));
     ctx.ui.notify(`focus: updated ${field.toLowerCase()}`, "info");
   } catch (error) {
     ctx.ui.notify(`focus: ${(error as Error).message}`, "warning");
   }
 }
 
-async function handleDelete(ctx: CommandContext, active: FocusPath | null, appendAndReconcile: AppendAndReconcile, capabilities: ReturnType<typeof activationCapabilities>): Promise<void> {
+async function handleDelete(ctx: CommandContext, active: FocusPath | null, appendAndReconcile: AppendAndReconcile): Promise<void> {
   const catalog = loadFocusCatalog(ctx.cwd);
   if (!catalog.foci.length) {
     ctx.ui.notify("focus: no foci to delete", "warning");
@@ -442,7 +447,7 @@ async function handleDelete(ctx: CommandContext, active: FocusPath | null, appen
       last: null,
     }));
   }
-  updateFocusStatus(ctx, active?.focus.id === focus.id ? null : active, capabilities);
+  updateFocusStatus(ctx, active?.focus.id === focus.id ? null : active);
   ctx.ui.notify(`focus: deleted ${focus.name}`, "info");
 }
 
@@ -489,7 +494,7 @@ function expected(container: { createdAt: string; revision: number }): { created
   return { createdAt: container.createdAt, revision: container.revision };
 }
 
-function updateFocusStatus(ctx: CommandContext, active: FocusPath | null, capabilities?: ReturnType<typeof activationCapabilities>): void {
+function updateFocusStatus(ctx: CommandContext, active: FocusPath | null): void {
   if (!active) {
     try { ctx.ui.setStatus("focus", undefined); } catch {}
     try { ctx.ui.setStatus("focus-capabilities", undefined); } catch {}
@@ -497,9 +502,7 @@ function updateFocusStatus(ctx: CommandContext, active: FocusPath | null, capabi
     return;
   }
   try { ctx.ui.setStatus("focus", ctx.ui.theme.fg("accent", `focus:${active.focus.name}`)); } catch {}
-  if (capabilities) {
-    try { ctx.ui.setStatus("focus-capabilities", `focus: loadout_profile ${capabilities.loadoutProfile.status}; process ${capabilities.process.status}; subagent ${capabilities.subagent.status}`); } catch {}
-  }
+  try { ctx.ui.setStatus("focus-capabilities", undefined); } catch {}
   try { ctx.ui.setTitle?.(`pi — ${active.focus.name}`); } catch {}
 }
 
@@ -531,7 +534,7 @@ function sendFocusMessage(pi: ExtensionAPI, ctx: CommandContext, message: string
 
 function focusHelp(): string {
   return [
-    "focus context is injected automatically; loadout, monitor, script, and agent intents require explicit tool calls.",
+    "focus context is injected automatically; apply loadout presets with /loadout, and invoke runbooks explicitly.",
     "focus KB and state paths are project-local.",
     "focus commands:",
     "  /focus            choose current, existing, or new focus",
