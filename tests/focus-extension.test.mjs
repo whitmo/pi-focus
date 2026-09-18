@@ -40,6 +40,7 @@ function createHarness(cwd, sessionId, options = {}) {
   const uiChanges = [];
   let selectCalls = 0;
   let setActiveToolsCalls = 0;
+  let activeTools = [...(options.activeTools ?? ["read", "bash", "write"])];
   let throwAfterAppend = false;
   const sessionManager = {
     sessionId,
@@ -61,8 +62,11 @@ function createHarness(cwd, sessionId, options = {}) {
       });
       if (throwAfterAppend) throw new Error("persistence failed after leaf advance");
     },
-    getActiveTools() { return ["read", "bash", "write"]; },
+    getActiveTools() { return [...activeTools]; },
     getAllTools() { return ["read", "bash", "write"].map((name) => ({ name })); },
+    getCommands() {
+      return (options.commands ?? []).map((name) => ({ name, source: "extension" }));
+    },
     setActiveTools() { setActiveToolsCalls += 1; throw new Error("focus must only guard tools"); },
   };
   const ctx = {
@@ -93,10 +97,12 @@ function createHarness(cwd, sessionId, options = {}) {
     events,
     notices,
     pi,
+    status,
     uiChanges,
     sessionManager,
     get selectCalls() { return selectCalls; },
     get setActiveToolsCalls() { return setActiveToolsCalls; },
+    set activeTools(value) { activeTools = [...value]; },
     set throwAfterAppend(value) { throwAfterAppend = value; },
   };
 }
@@ -113,6 +119,60 @@ function contextText(harness) {
   const result = harness.events.get("context")({ messages: [] }, harness.ctx);
   return result.messages.at(-1)?.content?.[0]?.text ?? "";
 }
+
+test("an active focus follows pi-loadout host selections without inventing a focus guard", async (t) => {
+  const { cwd } = createCatalog();
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const unguarded = updateFocusCatalog(cwd, (catalog) => createFocus(catalog, {
+    name: "Unguarded",
+    goals: "Let the session loadout remain authoritative",
+  }, NOW));
+  const h = createHarness(cwd, "session-loadout", { commands: ["loadout"] });
+
+  await start(h);
+  await use(h, unguarded.focus.id);
+  assert.match(contextText(h), /Loadout integration: \/loadout available \(live host selection\)/);
+  assert.match(contextText(h), /Focus guard: none; current host loadout remains authoritative/);
+  assert.equal(h.status.get("focus-capabilities"), undefined);
+
+  h.activeTools = ["read"];
+  assert.match(contextText(h), /Host loadout: 1\/3 registered tools active/);
+  assert.equal(h.events.get("tool_call")({ toolName: "read" }, h.ctx), undefined);
+  assert.equal(h.setActiveToolsCalls, 0);
+});
+
+test("a declared focus guard tracks live pi-loadout tool changes", async (t) => {
+  const { cwd } = createCatalog();
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const h = createHarness(cwd, "session-guarded-loadout", { commands: ["loadout"] });
+
+  await start(h);
+  await use(h, "alpha");
+  h.activeTools = ["bash"];
+  assert.match(contextText(h), /Loadout integration: \/loadout available \(live host selection\)/);
+  assert.match(contextText(h), /Focus guard: declared tools are intersected with the current host loadout/);
+  assert.match(h.events.get("tool_call")({ toolName: "read" }, h.ctx).reason, /declared but not active/);
+
+  h.activeTools = ["read"];
+  assert.equal(h.events.get("tool_call")({ toolName: "read" }, h.ctx), undefined);
+  assert.equal(h.setActiveToolsCalls, 0);
+});
+
+test("an active focus remains usable when pi-loadout is not registered", async (t) => {
+  const { cwd } = createCatalog();
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const unguarded = updateFocusCatalog(cwd, (catalog) => createFocus(catalog, {
+    name: "Standalone",
+  }, NOW));
+  const h = createHarness(cwd, "session-standalone");
+
+  await start(h);
+  await use(h, unguarded.focus.id);
+  assert.match(contextText(h), /Loadout integration: pi-loadout unavailable \(optional\)/);
+  assert.match(contextText(h), /Focus guard: none; current host loadout remains authoritative/);
+  assert.equal(h.events.get("tool_call")({ toolName: "read" }, h.ctx), undefined);
+  assert.equal(h.setActiveToolsCalls, 0);
+});
 
 test("extension instances keep context and guards session-local without changing tools", async (t) => {
   const { cwd } = createCatalog();
