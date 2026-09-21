@@ -87,6 +87,20 @@ test("resolvePathToolPolicy preserves registered and active host filtering", asy
   assert.equal(resolvePathToolPolicy({ focus: noPolicy, subfocus: noPolicySub }, ["read"], ["read"]), null);
 });
 
+test("buildFocusContext treats an undeclared focus as no extra guard over the host loadout", async () => {
+  const { activationCapabilities, buildFocusContext } = await runtime();
+  const context = buildFocusContext(
+    { focus: { ...focus, activation: undefined }, subfocus: null },
+    { focus: paths.focus },
+    activationCapabilities(["read", "bash", "write"], ["read"], ["loadout"]),
+  );
+
+  assert.match(context, /Focus guard: none; current host loadout remains authoritative\./);
+  assert.match(context, /Host loadout: 1\/3 registered tools active\./);
+  assert.match(context, /Loadout integration: \/loadout available \(live host selection\)\./);
+  assert.doesNotMatch(context, /loadout_profile unregistered\/unavailable/);
+});
+
 test("buildFocusContext reports the canonical deduplicated path policy", async () => {
   const { activationCapabilities, buildFocusContext, resolvePathToolPolicy } = await runtime();
   const duplicatePath = {
@@ -138,12 +152,12 @@ test("buildFocusContext renders captured focus and subfocus data without reading
   assert.match(context, new RegExp(paths.subfocus.state));
   assert.doesNotMatch(context, /state\.json|State index:/);
   assert.match(context, /Focus tools: read, grep, loadout_profile, missing/);
-  assert.match(context, /Focus loadout preset intent: focus-preset/);
+  assert.match(context, /Focus loadout preset declaration: focus-preset/);
   assert.match(context, /Focus monitor runbooks: focus monitor/);
   assert.match(context, /Focus script runbooks: focus script/);
   assert.match(context, /Focus agent runbooks: focus agent/);
   assert.match(context, /Subfocus tools: grep, write, process/);
-  assert.match(context, /Subfocus loadout preset intent: subfocus-preset/);
+  assert.match(context, /Subfocus loadout preset declaration: subfocus-preset/);
   assert.match(context, /Subfocus monitor runbooks: subfocus monitor/);
   assert.match(context, /Subfocus script runbooks: subfocus script/);
   assert.match(context, /Subfocus agent runbooks: subfocus agent/);
@@ -313,18 +327,34 @@ test("resolveToolPolicy retains guard-only declaration semantics", async () => {
   });
 });
 
-test("activationCapabilities retains active, inactive, and unregistered status", async () => {
+test("activationCapabilities recognizes current, legacy, and absent loadout integrations", async () => {
   const { activationCapabilities } = await runtime();
-  const capabilities = activationCapabilities(["read", "loadout_profile", "process"], ["read", "loadout_profile"]);
+  const capabilities = activationCapabilities(
+    ["read", "loadout_profile", "process"],
+    ["read", "loadout_profile"],
+    ["loadout"],
+  );
 
   assert.deepEqual(capabilities.registeredTools, ["read", "loadout_profile", "process"]);
   assert.deepEqual(capabilities.activeTools, ["read", "loadout_profile"]);
   assert.deepEqual(capabilities.availableTools, ["read", "loadout_profile"]);
-  assert.equal(capabilities.loadoutProfile.active, true);
-  assert.match(capabilities.loadoutProfile.status, /active and registered/i);
+  assert.deepEqual(capabilities.registeredCommands, ["loadout"]);
+  assert.equal(capabilities.loadout.available, true);
+  assert.equal(capabilities.loadout.interface, "command");
+  assert.match(capabilities.loadout.status, /\/loadout available.*live host selection/i);
   assert.equal(capabilities.process.available, true);
   assert.equal(capabilities.process.active, false);
   assert.match(capabilities.process.status, /registered but inactive.*explicit activation/i);
   assert.equal(capabilities.subagent.available, false);
   assert.match(capabilities.subagent.status, /unregistered\/unavailable/i);
+
+  const legacy = activationCapabilities(["loadout_profile"], ["loadout_profile"]);
+  assert.equal(legacy.loadout.available, true);
+  assert.equal(legacy.loadout.interface, "legacy-tool");
+  assert.match(legacy.loadout.status, /legacy loadout_profile tool active/i);
+
+  const absent = activationCapabilities(["read"], ["read"]);
+  assert.equal(absent.loadout.available, false);
+  assert.equal(absent.loadout.interface, "none");
+  assert.match(absent.loadout.status, /pi-loadout unavailable.*optional/i);
 });

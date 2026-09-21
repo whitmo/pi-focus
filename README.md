@@ -88,7 +88,11 @@ A bound focus or subfocus may declare allowed tool names. `pi-focus` guards each
 
 `@earendil-works/pi-coding-agent` and `typebox` are required peers. `pi-loadout` and `@juicesharp/rpiv-ask-user-question` are optional peers; `pi-focus` works without either optional package.
 
-The loadout seam is an agent's explicit `loadout_profile` `push`/`pop` action, not automatic extension invocation. Monitor, script, and subagent intents are declarative runbooks: they require explicit actions. Automatic runtime supervision is not included.
+When `pi-loadout` is installed, use `/loadout` to change the session's host tool set. The change applies live. `pi-focus` reads Pi's current active tools for every injected context and guarded tool call, so a declared focus policy is always intersected with the latest loadout. A focus with no tool declaration adds no guard: the current host loadout remains authoritative. `pi-focus` never calls `setActiveTools`, copies a session loadout into project focus metadata, or restores tools when a focus changes.
+
+A `loadoutPreset` value is declarative metadata, not an automatic preset application. Apply it explicitly with pi-loadout (for example, `/loadout use <name>`). Older loadout extensions exposing an active `loadout_profile` tool are still reported as a legacy integration. If neither interface exists, focus context and guards continue to work with the host's existing tool set.
+
+Monitor, script, and subagent intents are also declarative runbooks: they require explicit actions. Automatic runtime supervision is not included.
 
 ## Test
 
