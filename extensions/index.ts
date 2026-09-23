@@ -244,7 +244,7 @@ export default function focusExtension(pi: ExtensionAPI): void {
   pi.on("resources_discover", () => ({ skillPaths: [SKILL_PARENT] }));
 
   pi.on("input", async (event, ctx: CommandContext) => {
-    if (event.source === "extension") return { action: "continue" };
+    if (event.source === "extension" || !pi.sendUserMessage) return { action: "continue" };
     const invocation = event.text.trim().match(/^\/skill:focus(?:\s+([\s\S]+))?$/);
     if (!invocation?.[1]?.trim()) return { action: "continue" };
 
