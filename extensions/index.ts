@@ -147,17 +147,20 @@ export default function focusExtension(pi: ExtensionAPI): void {
     }));
   };
 
-  const bindPath = (ctx: CommandContext, path: FocusPath, steer: boolean): void => {
+  const bindPath = (ctx: CommandContext, path: FocusPath, steer: boolean): boolean => {
+    if (sameFocusPath(current?.binding.active ?? null, path)) return false;
     appendLocal(ctx, path);
     if (steer) sendFocusMessage(pi, ctx, `Return to this focus and keep the next answer centered on it:\n\n${path.focus.name}`);
+    return true;
   };
 
-  const bindCatalogFocus = (ctx: CommandContext, focusId: string, subfocusId: string | null = null, steer = true): void => {
+  const bindCatalogFocus = (ctx: CommandContext, focusId: string, subfocusId: string | null = null, steer = true): boolean => {
     try {
       const path = findFocusPath(loadFocusCatalog(sessionCwd), focusId, subfocusId) as FocusPath;
-      bindPath(ctx, path, steer);
+      return bindPath(ctx, path, steer);
     } catch (error) {
       ctx.ui.notify(`focus: unable to bind selected focus: ${(error as Error).message}`, "warning");
+      return false;
     }
   };
 
@@ -239,22 +242,72 @@ export default function focusExtension(pi: ExtensionAPI): void {
 
   pi.on("resources_discover", () => ({ skillPaths: [SKILL_PARENT] }));
 
-  pi.on("context", (event, ctx: CommandContext) => {
-    const active = current?.binding.active;
-    if (!active) return { messages: [...event.messages] };
-    const text = buildFocusContext(active, focusPaths(sessionCwd, active), capabilities());
-    return {
-      messages: [
-        ...event.messages,
-        {
-          role: "custom",
-          customType: "focus-context",
-          content: [{ type: "text", text }],
-          display: false,
-          timestamp: Date.now(),
-        },
-      ],
+  pi.on("input", async (event, ctx: CommandContext) => {
+    if (event.source === "extension") return { action: "continue" };
+    const invocation = event.text.trim().match(/^\/skill:focus(?:\s+([\s\S]+))?$/);
+    if (!invocation?.[1]?.trim()) return { action: "continue" };
+
+    const request = invocation[1].trim();
+    const task = request.replace(/^focus\s+on\s+/i, "").trim() || request;
+    const catalog = loadFocusCatalog(ctx.cwd);
+    const normalized = task.toLowerCase();
+    const embedded = catalog.foci.filter((focus) => {
+      const selectors = [focus.id, focus.name]
+        .map((value) => value.toLowerCase())
+        .filter((value) => value.length >= 3);
+      return selectors.some((value) => value === normalized || normalized.includes(value));
+    });
+
+    const forwardTask = (focusName: string, changed: boolean): void => {
+      sendFocusMessage(
+        pi,
+        ctx,
+        changed
+          ? `Return to this focus and keep the next answer centered on it:\n\n${focusName}\n\n${task}`
+          : task,
+      );
     };
+
+    if (embedded.length === 1) {
+      const focus = embedded[0];
+      forwardTask(focus.name, bindCatalogFocus(ctx, focus.id, null, false));
+      return { action: "handled" };
+    }
+
+    if (embedded.length > 1) {
+      if (!ctx.hasUI) {
+        ctx.ui.notify("focus: multiple focus names match the request; use /focus use <id>", "warning");
+        return { action: "handled" };
+      }
+      const options = embedded.map((focus) => `${focus.name} (${focus.id})`);
+      const selected = await ctx.ui.select("Choose focus", options);
+      const focus = embedded[options.indexOf(selected ?? "")];
+      if (focus) forwardTask(focus.name, bindCatalogFocus(ctx, focus.id, null, false));
+      return { action: "handled" };
+    }
+
+    if (!ctx.hasUI) {
+      ctx.ui.notify(`focus: no focus matched ${task}; use /focus <query>`, "warning");
+      return { action: "handled" };
+    }
+
+    let selectedName: string | null = null;
+    let changed = false;
+    await handleChooser(ctx, (commandCtx, focusId, subfocusId = null) => {
+      const path = findFocusPath(loadFocusCatalog(commandCtx.cwd), focusId, subfocusId) as FocusPath;
+      selectedName = path.focus.name;
+      changed = bindCatalogFocus(commandCtx, focusId, subfocusId, false);
+      return changed;
+    }, task, capabilities());
+    if (selectedName) forwardTask(selectedName, changed);
+    return { action: "handled" };
+  });
+
+  pi.on("before_agent_start", (event, _ctx: CommandContext) => {
+    const active = current?.binding.active;
+    if (!active) return;
+    const text = buildFocusContext(active, focusPaths(sessionCwd, active), capabilities());
+    return { systemPrompt: `${event.systemPrompt}\n\n${text}` };
   });
 
   pi.on("tool_call", (event, _ctx: CommandContext) => {
@@ -307,8 +360,7 @@ export default function focusExtension(pi: ExtensionAPI): void {
           ctx.ui.notify("focus: no previous focus; run /focus use", "warning");
           return;
         }
-        appendLocal(ctx, last, last);
-        sendFocusMessage(pi, ctx, `Return to this focus and keep the next answer centered on it:\n\n${last.focus.name}`);
+        bindPath(ctx, last, true);
       } else if (sub === "expand") {
         await handleExpand(ctx, bindPath);
       } else if (sub === "narrow") {
@@ -335,8 +387,8 @@ export default function focusExtension(pi: ExtensionAPI): void {
   });
 }
 
-type BindCatalogFocus = (ctx: CommandContext, focusId: string, subfocusId?: string | null, steer?: boolean) => void;
-type BindPath = (ctx: CommandContext, path: FocusPath, steer: boolean) => void;
+type BindCatalogFocus = (ctx: CommandContext, focusId: string, subfocusId?: string | null, steer?: boolean) => boolean;
+type BindPath = (ctx: CommandContext, path: FocusPath, steer: boolean) => boolean;
 type AppendAndReconcile = (ctx: CommandContext, binding: FocusBindingV1) => void;
 
 async function handleChooser(ctx: CommandContext, bindCatalogFocus: BindCatalogFocus, query = "", capabilities?: ReturnType<typeof activationCapabilities>): Promise<void> {
@@ -540,6 +592,13 @@ async function handleKnowledgeBase(ctx: CommandContext, active: FocusPath | null
     deleteKnowledgeEntry(ctx.cwd, focusId, selected, subfocusId);
     ctx.ui.notify("focus: knowledge entry deleted", "info");
   }
+}
+
+function sameFocusPath(left: FocusPath | null, right: FocusPath): boolean {
+  return left?.focus.id === right.focus.id
+    && left.focus.revision === right.focus.revision
+    && left.subfocus?.id === right.subfocus?.id
+    && left.subfocus?.revision === right.subfocus?.revision;
 }
 
 function activePath(ctx: CommandContext): FocusPath | null {

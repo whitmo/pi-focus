@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -41,6 +41,7 @@ function createHarness(cwd, sessionId, options = {}) {
   const bus = new Map();
   const commands = new Map();
   const notices = [];
+  const userMessages = [];
   const status = new Map();
   const uiChanges = [];
   let selectCalls = 0;
@@ -58,6 +59,7 @@ function createHarness(cwd, sessionId, options = {}) {
     on(name, handler) { events.set(name, handler); },
     events: { on(name, handler) { bus.set(name, handler); return () => bus.delete(name); } },
     registerCommand(name, command) { commands.set(name, command); },
+    sendUserMessage(message, options) { userMessages.push({ message, options }); },
     appendEntry(customType, data) {
       sessionManager.branch.push({
         type: "custom",
@@ -107,6 +109,7 @@ function createHarness(cwd, sessionId, options = {}) {
     status,
     uiChanges,
     sessionManager,
+    userMessages,
     get selectCalls() { return selectCalls; },
     get setActiveToolsCalls() { return setActiveToolsCalls; },
     set activeTools(value) { activeTools = [...value]; },
@@ -132,6 +135,10 @@ function bindChild(harness, focus) {
 }
 
 function contextText(harness) {
+  const beforeAgentStart = harness.events.get("before_agent_start");
+  if (beforeAgentStart) {
+    return beforeAgentStart({ systemPrompt: "", prompt: "", images: [] }, harness.ctx)?.systemPrompt ?? "";
+  }
   const result = harness.events.get("context")({ messages: [] }, harness.ctx);
   return result.messages.at(-1)?.content?.[0]?.text ?? "";
 }
@@ -410,6 +417,81 @@ test("catalog mutations rebind only their own session and deletion leaves peer s
   assert.equal(contextText(a), "");
   assert.match(contextText(b), /Focus: Alpha/);
   assert.match(contextText(b), /Focus captured revision: 1/);
+});
+
+test("focus context stays hidden in the system prompt instead of adding transcript messages", async (t) => {
+  const { cwd } = createCatalog();
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const h = createHarness(cwd, "session-hidden-context");
+
+  await start(h);
+  await use(h, "alpha");
+
+  assert.equal(h.events.has("context"), false);
+  assert.match(contextText(h), /Focus: Alpha/);
+});
+
+test("argument-bearing focus skill input switches once and forwards only the task when already active", async (t) => {
+  const { cwd } = createCatalog();
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const h = createHarness(cwd, "session-focus-input");
+  await start(h);
+
+  const first = await h.events.get("input")({
+    text: "/skill:focus focus on Beta and review its pull requests",
+    source: "interactive",
+  }, h.ctx);
+  assert.deepEqual(first, { action: "handled" });
+  assert.match(contextText(h), /Focus: Beta/);
+  assert.equal(h.userMessages.length, 1);
+  assert.match(h.userMessages[0].message, /Return to this focus/);
+  assert.match(h.userMessages[0].message, /review its pull requests/);
+
+  const repeated = await h.events.get("input")({
+    text: "/skill:focus focus on Beta and review its pull requests",
+    source: "interactive",
+  }, h.ctx);
+  assert.deepEqual(repeated, { action: "handled" });
+  assert.equal(h.userMessages.length, 2);
+  assert.doesNotMatch(h.userMessages[1].message, /Return to this focus/);
+  assert.equal(h.userMessages[1].message, "Beta and review its pull requests");
+});
+
+test("argument-bearing focus skill input can create through the existing chooser", async (t) => {
+  const { cwd } = createCatalog();
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const h = createHarness(cwd, "session-focus-create", {
+    hasUI: true,
+    select(_title, choices) { return choices.find((choice) => choice.startsWith("Create new focus")); },
+    editor(title) { return title === "Goals" ? "Ship the new initiative" : ""; },
+  });
+  await start(h);
+
+  const result = await h.events.get("input")({
+    text: "/skill:focus focus on New Initiative",
+    source: "interactive",
+  }, h.ctx);
+  assert.deepEqual(result, { action: "handled" });
+  assert.equal(loadFocusCatalog(cwd).foci.some((focus) => focus.name === "New Initiative"), true);
+  assert.match(contextText(h), /Ship the new initiative/);
+  assert.equal(h.userMessages.length, 1);
+});
+
+test("bare focus skill invocation still expands normally and extension-injected tasks do not recurse", async (t) => {
+  const { cwd } = createCatalog();
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const h = createHarness(cwd, "session-focus-pass-through");
+  await start(h);
+
+  assert.deepEqual(await h.events.get("input")({ text: "/skill:focus", source: "interactive" }, h.ctx), { action: "continue" });
+  assert.deepEqual(await h.events.get("input")({ text: "/skill:focus focus on Beta", source: "extension" }, h.ctx), { action: "continue" });
+});
+
+test("focus skill documents one-time acknowledgements and hidden recurring context", () => {
+  const skill = readFileSync(new URL("../skills/focus/SKILL.md", import.meta.url), "utf8");
+  assert.match(skill, /arguments/i);
+  assert.match(skill, /acknowledge.*once/i);
+  assert.match(skill, /must not be repeated/i);
 });
 
 test("commands use captured last, reconcile append outcomes, and complete catalog IDs", async (t) => {
