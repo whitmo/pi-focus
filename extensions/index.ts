@@ -150,8 +150,9 @@ export default function focusExtension(pi: ExtensionAPI): void {
   const bindPath = (ctx: CommandContext, path: FocusPath, steer: boolean): boolean => {
     if (sameFocusPath(current?.binding.active ?? null, path)) return false;
     appendLocal(ctx, path);
-    if (steer) sendFocusMessage(pi, ctx, `Return to this focus and keep the next answer centered on it:\n\n${path.focus.name}`);
-    return true;
+    const changed = sameFocusPath(current?.binding.active ?? null, path);
+    if (changed && steer) sendFocusMessage(pi, ctx, `Return to this focus and keep the next answer centered on it:\n\n${path.focus.name}`);
+    return changed;
   };
 
   const bindCatalogFocus = (ctx: CommandContext, focusId: string, subfocusId: string | null = null, steer = true): boolean => {
