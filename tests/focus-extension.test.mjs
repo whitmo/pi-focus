@@ -79,6 +79,8 @@ function createHarness(cwd, sessionId, options = {}) {
     },
     setActiveTools() { setActiveToolsCalls += 1; throw new Error("focus must only guard tools"); },
   };
+  if (options.omitSendUserMessage) delete pi.sendUserMessage;
+
   const ctx = {
     cwd,
     hasUI: options.hasUI ?? false,
@@ -438,31 +440,39 @@ test("focus context stays hidden in the system prompt instead of adding transcri
   assert.match(contextText(h), /Focus: Alpha/);
 });
 
-test("argument-bearing focus skill input preserves the original event and forwards only the task", async (t) => {
+test("argument-bearing focus skill input preserves idle input and rejects in-flight switching", async (t) => {
   const { cwd } = createCatalog();
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
-  const h = createHarness(cwd, "session-focus-input", { isIdle: false });
+  const h = createHarness(cwd, "session-focus-input");
   const image = { type: "image", data: "aW1hZ2U=", mimeType: "image/png" };
   await start(h);
 
-  const first = await h.events.get("input")({
+  const streaming = await h.events.get("input")({
     text: "/skill:focus focus on Beta and review its pull requests",
     images: [image],
     source: "interactive",
     streamingBehavior: "steer",
   }, h.ctx);
+  assert.deepEqual(streaming, { action: "handled" });
+  assert.equal(contextText(h), "");
+  assert.deepEqual(h.notices, [{ message: "focus: retry after the current run finishes", level: "warning" }]);
+
+  const first = await h.events.get("input")({
+    text: "/skill:focus focus on Beta and review its pull requests",
+    images: [image],
+    source: "interactive",
+  }, h.ctx);
   assert.deepEqual(first, { action: "transform", text: "review its pull requests", images: [image] });
-  assert.equal(h.waitForIdleCalls, 1);
   assert.match(contextText(h), /Focus: Beta/);
   assert.equal(h.userMessages.length, 0);
-  assert.deepEqual(h.notices, [{ message: "focus: Beta", level: "info" }]);
+  assert.deepEqual(h.notices.at(-1), { message: "focus: Beta", level: "info" });
 
   const repeated = await h.events.get("input")({
     text: "/skill:focus focus on Beta and review its pull requests",
     source: "interactive",
   }, h.ctx);
   assert.deepEqual(repeated, { action: "transform", text: "review its pull requests", images: undefined });
-  assert.equal(h.notices.length, 1, "already-active focus must not announce again");
+  assert.equal(h.notices.length, 2, "already-active focus must not announce again");
   assert.equal(h.userMessages.length, 0);
 });
 
@@ -487,6 +497,20 @@ test("argument-bearing focus skill input can create through the existing chooser
   assert.deepEqual(h.notices.at(-1), { message: "focus: New Initiative", level: "info" });
 });
 
+test("focus input transforms without the legacy sendUserMessage capability", async (t) => {
+  const { cwd } = createCatalog();
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const h = createHarness(cwd, "session-focus-transform-only", { omitSendUserMessage: true });
+  await start(h);
+
+  const result = await h.events.get("input")({
+    text: "/skill:focus focus on Beta and inspect tests",
+    source: "interactive",
+  }, h.ctx);
+  assert.deepEqual(result, { action: "transform", text: "inspect tests", images: undefined });
+  assert.match(contextText(h), /Focus: Beta/);
+});
+
 test("focus selectors use token boundaries and allow short exact names", async (t) => {
   const { cwd } = createCatalog();
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
@@ -509,6 +533,33 @@ test("focus selectors use token boundaries and allow short exact names", async (
   }, h.ctx);
   assert.deepEqual(shortName, { action: "transform", text: "inspect tests", images: undefined });
   assert.match(contextText(h), /Focus: QA/);
+
+  const taskMentionsFocus = await h.events.get("input")({
+    text: "/skill:focus focus on Beta and compare QA",
+    source: "interactive",
+  }, h.ctx);
+  assert.deepEqual(taskMentionsFocus, { action: "transform", text: "compare QA", images: undefined });
+  assert.match(contextText(h), /Focus: Beta/);
+});
+
+test("related focus queries select a target without forwarding the query as a task", async (t) => {
+  const { cwd } = createCatalog();
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const h = createHarness(cwd, "session-focus-related", {
+    hasUI: true,
+    select(title, choices) {
+      return title.includes("Bet") ? choices.find((choice) => choice.includes("Beta")) : undefined;
+    },
+  });
+  await start(h);
+
+  const result = await h.events.get("input")({
+    text: "/skill:focus focus on Bet",
+    source: "interactive",
+  }, h.ctx);
+  assert.deepEqual(result, { action: "handled" });
+  assert.match(contextText(h), /Focus: Beta/);
+  assert.equal(h.userMessages.length, 0);
 });
 
 test("mutating focus commands wait for an active run to settle", async (t) => {
