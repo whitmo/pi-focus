@@ -48,10 +48,10 @@ Retiring a focus removes its descriptor but preserves its `kb/` and `state/` dat
 
 Each running agent owns its active and last focus snapshots. Catalog edits do not change an existing binding: `/focus use` explicitly captures the latest catalog revision, while `/focus on` restores the previously captured revision.
 
-- Initial startup, `/new`, `/resume`, and process restart start unbound; an interactive user is asked to choose again.
-- Hot `/reload` restores the latest valid binding on the current session branch.
+- Initial startup, `/new`, and process restart start unbound; an interactive user is asked to choose again.
+- `/resume` and hot `/reload` restore the latest valid binding on the current session branch.
 - `/fork` and `/clone` copy the selected source branch's latest binding, then the new session changes independently.
-- Fresh child agents start unbound. Parent/child propagation would require an independently designed optional adapter, which is not included.
+- A launcher may request `pi-focus:bind-child` on the child-local extension bus after extension binding and before the first prompt. The request selects catalog IDs, persists a local immutable snapshot, and acknowledges success or failure synchronously. It never inherits or changes the parent's binding, activates a loadout, or steers the child. `pi-subagents` exposes this as `Agent.focus`; omitted selectors retain the unbound behavior.
 
 ## Commands
 

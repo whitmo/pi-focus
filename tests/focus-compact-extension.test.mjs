@@ -30,6 +30,7 @@ async function registrationsFor(path) {
   const tools = [];
   const pi = {
     on(name) { events.push(name); },
+    events: { on() { return () => {}; } },
     registerCommand(name) { commands.push(name); },
     registerTool(tool) { tools.push(tool.name); },
   };

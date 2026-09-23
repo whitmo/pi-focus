@@ -57,6 +57,7 @@ type FocusCommand = {
 
 type ExtensionAPI = {
   on: (event: string, handler: (...args: any[]) => unknown) => void;
+  events: { on: (channel: string, handler: (data: unknown) => void) => () => void };
   registerCommand: (name: string, command: FocusCommand) => void;
   appendEntry: (customType: string, data: unknown) => void;
   sendUserMessage?: (message: string, options?: { deliverAs: "followUp" }) => void;
@@ -99,14 +100,17 @@ import {
   FOCUS_BINDING_CUSTOM_TYPE,
   createForkedFocusBinding,
   createLocalFocusBinding,
+  focusBindingIds,
   restoreFocusBinding,
 } from "./focus-session.mjs";
 
+const CHILD_FOCUS_BIND_CHANNEL = "pi-focus:bind-child";
 const SKILL_PARENT = fileURLToPath(new URL("../skills", import.meta.url));
 const SUBCOMMANDS = ["new", "edit", "delete", "kb", "on", "expand", "narrow", "off", "status", "use", "help"];
 
 export default function focusExtension(pi: ExtensionAPI): void {
   let current: { entryId: string; binding: FocusBindingV1 } | null = null;
+  let sessionContext: CommandContext | null = null;
   let sessionCwd = process.cwd();
 
   const registeredTools = (): string[] => pi.getAllTools?.().map((tool) => tool.name) ?? [];
@@ -116,14 +120,22 @@ export default function focusExtension(pi: ExtensionAPI): void {
     .map((command) => command.name) ?? [];
   const capabilities = () => activationCapabilities(registeredTools(), activeTools(), registeredCommands());
 
-  const appendAndReconcile = (ctx: CommandContext, binding: FocusBindingV1): void => {
+  const appendAndReconcile = (
+    ctx: CommandContext,
+    binding: FocusBindingV1,
+  ): { ok: true } | { ok: false; error: string } => {
     try {
       pi.appendEntry(FOCUS_BINDING_CUSTOM_TYPE, binding);
     } catch (error) {
-      ctx.ui.notify(`focus: binding persistence failed: ${(error as Error).message}`, "warning");
+      const message = `focus: binding persistence failed: ${(error as Error).message}`;
+      ctx.ui.notify(message, "warning");
+      current = restoreFocusBinding(ctx.sessionManager.getBranch());
+      updateFocusStatus(ctx, current?.binding.active ?? null);
+      return { ok: false, error: message };
     }
     current = restoreFocusBinding(ctx.sessionManager.getBranch());
     updateFocusStatus(ctx, current?.binding.active ?? null);
+    return current ? { ok: true } : { ok: false, error: "focus: binding reconciliation failed" };
   };
 
   const appendLocal = (ctx: CommandContext, active: FocusPath | null, last: FocusPath | null = active): void => {
@@ -149,9 +161,52 @@ export default function focusExtension(pi: ExtensionAPI): void {
     }
   };
 
+  pi.events.on(CHILD_FOCUS_BIND_CHANNEL, (data: unknown) => {
+    if (!isRecord(data) || typeof data.acknowledge !== "function") return;
+    const acknowledge = data.acknowledge as (result: { ok: true } | { ok: false; error: string }) => void;
+    try {
+      if (!sessionContext) throw new Error("focus: child binding requested before session start");
+      if (data.resume === true) {
+        if (data.focusId !== undefined || data.subfocusId !== undefined) {
+          throw new Error("focus: invalid resume binding request");
+        }
+        if (!current?.binding.active) throw new Error("focus: resumed child has no active persisted binding");
+        acknowledge({ ok: true });
+        return;
+      }
+      if (typeof data.focusId !== "string") throw new Error("focus: invalid focus selector");
+      if (data.subfocusId !== undefined && typeof data.subfocusId !== "string") {
+        throw new Error("focus: invalid subfocus selector");
+      }
+      const requested = { focusId: data.focusId, subfocusId: data.subfocusId ?? null };
+      const existing = current ? focusBindingIds(current.binding) : null;
+      if (existing) {
+        if (existing.focusId === requested.focusId && existing.subfocusId === requested.subfocusId) {
+          acknowledge({ ok: true });
+          return;
+        }
+        throw new Error("focus: child focus selector conflicts with the resumed session binding");
+      }
+      const path = findFocusPath(
+        loadFocusCatalog(sessionCwd),
+        requested.focusId,
+        requested.subfocusId,
+      ) as FocusPath;
+      acknowledge(appendAndReconcile(sessionContext, createLocalFocusBinding({
+        agentSessionId: sessionContext.sessionManager.getSessionId(),
+        capturedAt: new Date().toISOString(),
+        active: path,
+        last: path,
+      })));
+    } catch (error) {
+      acknowledge({ ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   pi.on("session_start", async (event, ctx: CommandContext) => {
+    sessionContext = ctx;
     sessionCwd = ctx.cwd;
-    if (event.reason === "reload") {
+    if (event.reason === "reload" || event.reason === "resume") {
       current = restoreFocusBinding(ctx.sessionManager.getBranch());
       updateFocusStatus(ctx, current?.binding.active ?? null);
       return;
@@ -178,6 +233,7 @@ export default function focusExtension(pi: ExtensionAPI): void {
 
   pi.on("session_shutdown", (_event, _ctx: CommandContext) => {
     current = null;
+    sessionContext = null;
     sessionCwd = process.cwd();
   });
 
@@ -530,6 +586,10 @@ function sendFocusMessage(pi: ExtensionAPI, ctx: CommandContext, message: string
     pi.sendUserMessage(message, { deliverAs: "followUp" });
     ctx.ui.notify("focus: queued return-to-focus follow-up", "info");
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function focusHelp(): string {
