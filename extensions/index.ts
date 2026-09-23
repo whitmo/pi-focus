@@ -247,31 +247,27 @@ export default function focusExtension(pi: ExtensionAPI): void {
     const invocation = event.text.trim().match(/^\/skill:focus(?:\s+([\s\S]+))?$/);
     if (!invocation?.[1]?.trim()) return { action: "continue" };
 
-    const request = invocation[1].trim();
-    const task = request.replace(/^focus\s+on\s+/i, "").trim() || request;
+    if (ctx.isIdle && !ctx.isIdle()) await ctx.waitForIdle?.();
+    const request = invocation[1].trim().replace(/^focus\s+on\s+/i, "").trim();
     const catalog = loadFocusCatalog(ctx.cwd);
-    const normalized = task.toLowerCase();
-    const embedded = catalog.foci.filter((focus) => {
-      const selectors = [focus.id, focus.name]
-        .map((value) => value.toLowerCase())
-        .filter((value) => value.length >= 3);
-      return selectors.some((value) => value === normalized || normalized.includes(value));
-    });
-
-    const forwardTask = (focusName: string, changed: boolean): void => {
-      sendFocusMessage(
-        pi,
-        ctx,
-        changed
-          ? `Return to this focus and keep the next answer centered on it:\n\n${focusName}\n\n${task}`
-          : task,
-      );
+    const embedded = catalog.foci.filter((focus) =>
+      [focus.id, focus.name].some((selector) => containsFocusSelector(request, selector))
+    );
+    const finish = (focus: FocusPath["focus"], changed: boolean) => {
+      if (changed) ctx.ui.notify(`focus: ${focus.name}`, "info");
+      const task = remainingFocusTask(request, focus);
+      if (!task && !event.images?.length) return { action: "handled" as const };
+      return {
+        action: "transform" as const,
+        text: task || "Use the attached input under the selected focus.",
+        images: event.images,
+      };
     };
 
     if (embedded.length === 1) {
       const focus = embedded[0];
-      forwardTask(focus.name, bindCatalogFocus(ctx, focus.id, null, false));
-      return { action: "handled" };
+      const changed = bindCatalogFocus(ctx, focus.id, null, false);
+      return finish(findFocusPath(loadFocusCatalog(ctx.cwd), focus.id).focus, changed);
     }
 
     if (embedded.length > 1) {
@@ -282,25 +278,25 @@ export default function focusExtension(pi: ExtensionAPI): void {
       const options = embedded.map((focus) => `${focus.name} (${focus.id})`);
       const selected = await ctx.ui.select("Choose focus", options);
       const focus = embedded[options.indexOf(selected ?? "")];
-      if (focus) forwardTask(focus.name, bindCatalogFocus(ctx, focus.id, null, false));
-      return { action: "handled" };
+      if (!focus) return { action: "handled" };
+      const changed = bindCatalogFocus(ctx, focus.id, null, false);
+      return finish(findFocusPath(loadFocusCatalog(ctx.cwd), focus.id).focus, changed);
     }
 
     if (!ctx.hasUI) {
-      ctx.ui.notify(`focus: no focus matched ${task}; use /focus <query>`, "warning");
+      ctx.ui.notify("focus: no matching focus; use /focus use <id> or retry in an interactive host", "warning");
       return { action: "handled" };
     }
 
-    let selectedName: string | null = null;
+    let selectedFocus: FocusPath["focus"] | null = null;
     let changed = false;
     await handleChooser(ctx, (commandCtx, focusId, subfocusId = null) => {
       const path = findFocusPath(loadFocusCatalog(commandCtx.cwd), focusId, subfocusId) as FocusPath;
-      selectedName = path.focus.name;
+      selectedFocus = path.focus;
       changed = bindCatalogFocus(commandCtx, focusId, subfocusId, false);
       return changed;
-    }, task, capabilities());
-    if (selectedName) forwardTask(selectedName, changed);
-    return { action: "handled" };
+    }, request, capabilities());
+    return selectedFocus ? finish(selectedFocus, changed) : { action: "handled" };
   });
 
   pi.on("before_agent_start", (event, _ctx: CommandContext) => {
@@ -345,6 +341,9 @@ export default function focusExtension(pi: ExtensionAPI): void {
     },
     handler: async (args: string, ctx: CommandContext): Promise<void> => {
       const [sub = "", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+      if (!["status", "help"].includes(sub) && ctx.isIdle && !ctx.isIdle()) {
+        await ctx.waitForIdle?.();
+      }
       const requiresUI = !["off", "status", "use", "on", "help"].includes(sub);
       if (!ctx.hasUI && requiresUI) {
         ctx.ui.notify("focus: interactive focus management is unavailable in this host", "warning");
@@ -592,6 +591,26 @@ async function handleKnowledgeBase(ctx: CommandContext, active: FocusPath | null
     deleteKnowledgeEntry(ctx.cwd, focusId, selected, subfocusId);
     ctx.ui.notify("focus: knowledge entry deleted", "info");
   }
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function containsFocusSelector(request: string, selector: string): boolean {
+  const escaped = escapeRegex(selector.trim());
+  if (!escaped) return false;
+  return new RegExp(`(^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`, "i").test(request);
+}
+
+function remainingFocusTask(request: string, focus: FocusPath["focus"]): string {
+  const selectors = [focus.name, focus.id].sort((left, right) => right.length - left.length);
+  for (const selector of selectors) {
+    const match = request.match(new RegExp(`^${escapeRegex(selector)}(?=$|[^a-z0-9])`, "i"));
+    if (!match) continue;
+    return request.slice(match[0].length).trim().replace(/^(?:and\b|[:,—-])\s*/i, "");
+  }
+  return request;
 }
 
 function sameFocusPath(left: FocusPath | null, right: FocusPath): boolean {
