@@ -39,8 +39,9 @@ async function boot(cwd, agentDir) {
     sessionManager,
     tools: ["read", "bash"],
   });
-  await session.bindExtensions({});
-  return { eventBus, session, sessionManager };
+  const extensionErrors = [];
+  await session.bindExtensions({ onError(error) { extensionErrors.push(error); } });
+  return { eventBus, extensionErrors, session, sessionManager };
 }
 
 function request(eventBus, selector) {
@@ -88,8 +89,15 @@ test("real loader and session persist child focus before context or tool guards"
   );
 
   const context = await runtime.session.extensionRunner.emitContext([]);
-  assert.match(context.at(-1).content[0].text, /Focus: Child launch/);
-  assert.match(context.at(-1).content[0].text, /Subfocus: Adapter/);
+  assert.deepEqual(context, []);
+  const beforeStart = await runtime.session.extensionRunner.emitBeforeAgentStart(
+    "child request",
+    undefined,
+    { customPrompt: "base system prompt", cwd },
+  );
+  assert.deepEqual(runtime.extensionErrors, []);
+  assert.match(beforeStart.systemPromptOptions.forceSystemPrompt, /Focus: Child launch/);
+  assert.match(beforeStart.systemPromptOptions.forceSystemPrompt, /Subfocus: Adapter/);
   const blocked = await runtime.session.extensionRunner.emitToolCall({
     type: "tool_call",
     toolCallId: "tool-1",
