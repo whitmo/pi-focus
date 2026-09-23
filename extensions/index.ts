@@ -244,19 +244,28 @@ export default function focusExtension(pi: ExtensionAPI): void {
   pi.on("resources_discover", () => ({ skillPaths: [SKILL_PARENT] }));
 
   pi.on("input", async (event, ctx: CommandContext) => {
-    if (event.source === "extension" || !pi.sendUserMessage) return { action: "continue" };
+    if (event.source === "extension") return { action: "continue" };
     const invocation = event.text.trim().match(/^\/skill:focus(?:\s+([\s\S]+))?$/);
     if (!invocation?.[1]?.trim()) return { action: "continue" };
 
-    if (ctx.isIdle && !ctx.isIdle()) await ctx.waitForIdle?.();
+    if (event.streamingBehavior) {
+      ctx.ui.notify("focus: retry after the current run finishes", "warning");
+      return { action: "handled" };
+    }
     const request = invocation[1].trim().replace(/^focus\s+on\s+/i, "").trim();
     const catalog = loadFocusCatalog(ctx.cwd);
-    const embedded = catalog.foci.filter((focus) =>
-      [focus.id, focus.name].some((selector) => containsFocusSelector(request, selector))
-    );
-    const finish = (focus: FocusPath["focus"], changed: boolean) => {
+    const leading = catalog.foci
+      .map((focus) => ({ focus, length: leadingFocusSelectorLength(request, focus) }))
+      .filter(({ length }) => length > 0);
+    const longestLeading = Math.max(0, ...leading.map(({ length }) => length));
+    const embedded = longestLeading > 0
+      ? leading.filter(({ length }) => length === longestLeading).map(({ focus }) => focus)
+      : catalog.foci.filter((focus) =>
+          [focus.id, focus.name].some((selector) => containsFocusSelector(request, selector))
+        );
+    const finish = (focus: FocusPath["focus"], changed: boolean, taskOverride?: string) => {
       if (changed) ctx.ui.notify(`focus: ${focus.name}`, "info");
-      const task = remainingFocusTask(request, focus);
+      const task = taskOverride ?? remainingFocusTask(request, focus);
       if (!task && !event.images?.length) return { action: "handled" as const };
       return {
         action: "transform" as const,
@@ -297,7 +306,7 @@ export default function focusExtension(pi: ExtensionAPI): void {
       changed = bindCatalogFocus(commandCtx, focusId, subfocusId, false);
       return changed;
     }, request, capabilities());
-    return selectedFocus ? finish(selectedFocus, changed) : { action: "handled" };
+    return selectedFocus ? finish(selectedFocus, changed, "") : { action: "handled" };
   });
 
   pi.on("before_agent_start", (event, _ctx: CommandContext) => {
@@ -602,6 +611,13 @@ function containsFocusSelector(request: string, selector: string): boolean {
   const escaped = escapeRegex(selector.trim());
   if (!escaped) return false;
   return new RegExp(`(^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`, "i").test(request);
+}
+
+function leadingFocusSelectorLength(request: string, focus: FocusPath["focus"]): number {
+  return [focus.name, focus.id].reduce((longest, selector) => {
+    const match = request.match(new RegExp(`^${escapeRegex(selector)}(?=$|[^a-z0-9])`, "i"));
+    return Math.max(longest, match?.[0].length ?? 0);
+  }, 0);
 }
 
 function remainingFocusTask(request: string, focus: FocusPath["focus"]): string {
