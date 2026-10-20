@@ -91,8 +91,7 @@ test("real loader and session persist child focus before context or tool guards"
   const context = await runtime.session.extensionRunner.emitContext([]);
   assert.deepEqual(context, []);
   const beforeStart = await runtime.session.extensionRunner.emitBeforeAgentStart(
-    "child request",
-    undefined,
+    { messageType: "user", prompt: "child request", images: [] },
     { customPrompt: "base system prompt", cwd },
   );
   assert.deepEqual(runtime.extensionErrors, []);
